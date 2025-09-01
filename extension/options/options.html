@@ -1,0 +1,47 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>ViceBank — Consent</title>
+  <link rel="stylesheet" href="options.css"/>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Set Your Accountability Rules</h1>
+    <p>You get <span id="graceVal">3</span> min/day free on selected categories.</p>
+    <p>After that, ViceBank charges <span id="ratePorn">$0.05/min (Porn)</span> and <span id="rateGambling">$0.50/min (Gambling)</span> while those sites are open in the foreground.</p>
+    <p>We only record domain names and minutes—never page content.</p>
+    <p>Charges are automatic & weekly. You can change your grace (0–3) and increase your rate anytime; lowering applies after your current streak ends.</p>
+
+    <div class="checks">
+      <label><input type="checkbox" id="c1"> I agree ViceBank may charge per-minute after my daily grace is used.</label>
+      <label><input type="checkbox" id="c2"> I understand charges are non-refundable once incurred.</label>
+      <label><input type="checkbox" id="c3"> I reviewed the Terms of Service and Billing Policy.</label>
+      <label><input type="checkbox" id="c4"> I consent to domain-level monitoring (no page content) and local notifications.</label>
+    </div>
+
+    <div class="row">
+      <label>Grace per category (0–3:00):</label>
+      <input type="text" id="graceInput" placeholder="mm:ss or minutes" value="3:00"/>
+    </div>
+
+    <div class="row">
+      <label>Rates ($/min): Porn</label>
+      <input type="number" step="0.01" id="ratePornInput" value="0.05"/>
+      <label>Gambling</label>
+      <input type="number" step="0.01" id="rateGamblingInput" value="0.50"/>
+    </div>
+
+    <div class="row">
+      <label>Backend URL</label>
+      <input type="text" id="backendUrl" value="http://localhost:4242"/>
+    </div>
+
+    <div class="cta">
+      <button id="agree" disabled>Agree & Continue</button>
+    </div>
+  </div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

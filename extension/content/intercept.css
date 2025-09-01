@@ -1,0 +1,43 @@
+
+.vb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.vb-modal {
+  width: min(520px, 90vw);
+  background: #0A0A0A;
+  color: white;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro", Segoe UI, Roboto, sans-serif;
+  border: 1px solid #222;
+}
+.vb-modal h2 {
+  margin: 0 0 8px 0;
+  font-size: 20px;
+}
+.vb-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+.vb-actions button {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+}
+#vb-continue {
+  background: #A855F7;
+  color: white;
+}
+#vb-stop {
+  background: #222;
+  color: #eee;
+}
