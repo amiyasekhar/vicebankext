@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ViceBank Landing (Dynamic)</title>
+<br>    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-[#0A0A0A] text-white">
+    <div id="root" style="padding:16px;color:white">Loading…</div>
+
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/framer-motion@10.18.1/dist/framer-motion.umd.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script>
+      window.motion = window.framerMotion.motion;
+      window.useScroll = window.framerMotion.useScroll;
+      window.useTransform = window.framerMotion.useTransform;
+
+      async function loadAndRender() {
+        try {
+          const res = await fetch('/dev/testlandingpage.jsx');
+          let src = await res.text();
+
+          // 1) Convert ESM default export to CJS for eval
+          src = src.replace(/\bexport\s+default\s+/m, 'module.exports = ');
+
+          // 2) Replace specific imports with globals so identifiers exist
+          src = src.replace(/import\s+React\s+from\s+['\"]react['\"];?/g, 'const React = window.React;');
+          src = src.replace(/import\s*\{\s*motion\s*,\s*useScroll\s*,\s*useTransform\s*\}\s*from\s*['\"]framer-motion['\"];?/g, 'const { motion, useScroll, useTransform } = window.framerMotion;');
+
+          // 3) Drop any other stray import lines (not expected here)
+          src = src.replace(/^\s*import[^;]+;\s*/gm, '');
+
+          const transformed = Babel.transform(src, { presets: ['react'] }).code;
+
+          const module = { exports: {} };
+          const requireShim = (name) => {
+            if (name === 'react') return window.React;
+            if (name === 'framer-motion') return window.framerMotion;
+            return {};
+          };
+
+          new Function('module', 'exports', 'require', transformed)(module, module.exports, requireShim);
+          const Component = module.exports.default || module.exports || (() => null);
+          const rootEl = document.getElementById('root');
+          const root = ReactDOM.createRoot(rootEl);
+          root.render(React.createElement(Component));
+        } catch (err) {
+          console.error('[landing-dynamic] render error:', err);
+          const pre = document.createElement('pre');
+          pre.style.whiteSpace = 'pre-wrap';
+          pre.style.padding = '16px';
+          pre.style.background = '#1f2937';
+          pre.style.color = '#fca5a5';
+          pre.textContent = String(err && err.stack || err);
+          document.body.prepend(pre);
+        }
+      }
+
+      loadAndRender();
+    </script>
+  </body>
+  </html>
+

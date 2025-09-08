@@ -49,12 +49,16 @@ chrome.runtime.onInstalled.addListener(async () => {
   } else {
     await set({ ...DEFAULTS, ...st, counters: st.counters ?? DEFAULTS.counters });
   }
+  try { chrome.action.setBadgeText({ text: "" }); } catch {}
+  try { chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); } catch {}
   chrome.alarms.create("vb_tick", { periodInMinutes: 1 });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   const st = await get(null);
   if (!st?.userId) await set({ ...DEFAULTS, userId: uuidv4() });
+  try { chrome.action.setBadgeText({ text: "" }); } catch {}
+  try { chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); } catch {}
   chrome.alarms.create("vb_tick", { periodInMinutes: 1 });
 });
 
@@ -88,7 +92,7 @@ function initCounters(st, today) {
 
 async function refreshActive() {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tabs?.[0]?.url) { active.category = null; return; }
+  if (!tabs?.[0]?.url) { active.category = null; try { chrome.action.setBadgeText({ text: "" }); } catch {}; return; }
 
   const tab = tabs[0];
   const st = await get(["categoriesOn", "blocklist"]);
@@ -96,10 +100,10 @@ async function refreshActive() {
 
   // Simple blocklist (supports "*.example.com")
   const blocked = (st.blocklist || []).some(p => p.startsWith("*.") ? host.endsWith(p.slice(1)) : (host === p || host.endsWith("." + p)));
-  if (blocked) { active.category = null; return; }
+  if (blocked) { active.category = null; try { chrome.action.setBadgeText({ text: "" }); } catch {}; return; }
 
   const cat = detectCategory(host);
-  if (!cat || !st.categoriesOn?.[cat]) { active.category = null; return; }
+  if (!cat || !st.categoriesOn?.[cat]) { active.category = null; try { chrome.action.setBadgeText({ text: "" }); } catch {}; return; }
 
   const now = Date.now();
   if (active.category !== cat || active.host !== host) {
@@ -139,11 +143,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
     const freeUsed = st.counters?.[cat]?.freeMin ?? 0;
     const paidUsed = st.counters?.[cat]?.paidMin ?? 0;
+    try { console.log(`[ViceBank] tick: cat=${cat}, free=${freeUsed}, paid=${paidUsed}, grace=${grace}`); } catch {}
 
     if (freeUsed < grace) {
       // Count one free minute
       st.counters[cat].freeMin = freeUsed + 1;
       await set({ counters: st.counters });
+      try {
+        const total = (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
+        chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); // green for free
+        chrome.action.setBadgeText({ text: `${total}` });
+      } catch {}
 
       // 80% grace warning — FIXED the Python-style line to a JS ternary
       const threshold = grace > 0 ? Math.ceil(0.8 * grace) : 0;
@@ -174,7 +184,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       // User chose to keep paying — tick a local paid minute for UI
       st.counters[cat].paidMin = paidUsed + 1;
       await set({ counters: st.counters });
-      chrome.action.setBadgeText({ text: `${st.counters[cat].paidMin}` });
+      try {
+        const total = (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
+        chrome.action.setBadgeBackgroundColor({ color: "#e53935" }); // red for paid
+        chrome.action.setBadgeText({ text: `${total}` });
+      } catch {}
     }
   } catch (err) {
     console.error("[ViceBank] tick error:", err);
