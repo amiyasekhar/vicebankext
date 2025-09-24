@@ -9,14 +9,18 @@
 //     amount = ceil(max(0, minutesSoFar - grace)) * rate
 
 import { get, set } from "../lib/storage.js";
-import { hostFromUrl, todayLocalISO, uuidv4 } from "../lib/util.js";
-
+import {
+  hostFromUrl,
+  todayLocalISO,
+  uuidv4,
+  syncMinuteToBackend,
+} from "../lib/util.js";
 // ---------- Defaults ----------
 const DEFAULTS = {
   enabled: true,
-  grace: { porn: 3, gambling: 3 },           // minutes/day per category
-  floors: { porn: 0.05, gambling: 0.50 },    // $/min (server should enforce too)
-  rates: { porn: 0.05, gambling: 0.50 },     // default $/min
+  grace: { porn: 3, gambling: 3 }, // minutes/day per category
+  floors: { porn: 0.05, gambling: 0.5 }, // $/min (server should enforce too)
+  rates: { porn: 0.05, gambling: 0.5 }, // default $/min
   categoriesOn: { porn: true, gambling: true },
   blocklist: [],
   lastResetLocalDate: null,
@@ -27,18 +31,24 @@ const DEFAULTS = {
   counters: {
     date: null,
     porn: { freeMin: 0, paidMin: 0 },
-    gambling: { freeMin: 0, paidMin: 0 }
+    gambling: { freeMin: 0, paidMin: 0 },
   },
 
   // Whether the user has elected to keep paying after grace for each category
-  paidActive: { porn: false, gambling: false }
+  paidActive: { porn: false, gambling: false },
 };
 
-const DEBOUNCE_SECONDS = 15;   // must be in foreground this long to count a minute
+const DEBOUNCE_SECONDS = 5; // must be in foreground this long to count a minute
 const IDLE_CUTOFF_SECONDS = 90;
 
 // In-memory active page/category snapshot
-let active = { category: null, domain: null, host: null, sinceTs: 0, lastTickTs: 0 };
+let active = {
+  category: null,
+  domain: null,
+  host: null,
+  sinceTs: 0,
+  lastTickTs: 0,
+};
 
 // ---------- Install / Startup ----------
 chrome.runtime.onInstalled.addListener(async () => {
@@ -47,19 +57,32 @@ chrome.runtime.onInstalled.addListener(async () => {
     await set({ ...DEFAULTS, userId: uuidv4() });
     chrome.runtime.openOptionsPage(); // show consent screen
   } else {
-    await set({ ...DEFAULTS, ...st, counters: st.counters ?? DEFAULTS.counters });
+    await set({
+      ...DEFAULTS,
+      ...st,
+      counters: st.counters ?? DEFAULTS.counters,
+    });
   }
-  try { chrome.action.setBadgeText({ text: "" }); } catch {}
-  try { chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); } catch {}
-  chrome.alarms.create("vb_tick", { periodInMinutes: 1 });
+  try {
+    chrome.action.setBadgeText({ text: "" });
+  } catch {}
+  try {
+    chrome.action.setBadgeBackgroundColor({ color: "#4caf50" });
+  } catch {}
+  chrome.alarms.create("vb_tick", { periodInMinutes: 0.1 }); // every 6 seconds
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   const st = await get(null);
+  console.log("UserId:", st.userId);
   if (!st?.userId) await set({ ...DEFAULTS, userId: uuidv4() });
-  try { chrome.action.setBadgeText({ text: "" }); } catch {}
-  try { chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); } catch {}
-  chrome.alarms.create("vb_tick", { periodInMinutes: 1 });
+  try {
+    chrome.action.setBadgeText({ text: "" });
+  } catch {}
+  try {
+    chrome.action.setBadgeBackgroundColor({ color: "#4caf50" });
+  } catch {}
+  chrome.alarms.create("vb_tick", { periodInMinutes: 0.1 }); // every 6 seconds
 });
 
 // ---------- Category lists ----------
@@ -69,8 +92,13 @@ async function loadLists() {
   return resp.json();
 }
 let lists = null;
-async function ensureLists() { if (!lists) lists = await loadLists(); return lists; }
-function endsWithHost(host, pattern) { return host === pattern || host.endsWith("." + pattern); }
+async function ensureLists() {
+  if (!lists) lists = await loadLists();
+  return lists;
+}
+function endsWithHost(host, pattern) {
+  return host === pattern || host.endsWith("." + pattern);
+}
 function detectCategory(host) {
   if (!host || !lists) return null;
   for (const p of lists.porn) if (endsWithHost(host, p)) return "porn";
@@ -81,7 +109,11 @@ function detectCategory(host) {
 // ---------- Helpers ----------
 function initCounters(st, today) {
   if (!st.counters || st.counters.date !== today) {
-    st.counters = { date: today, porn: { freeMin: 0, paidMin: 0 }, gambling: { freeMin: 0, paidMin: 0 } };
+    st.counters = {
+      date: today,
+      porn: { freeMin: 0, paidMin: 0 },
+      gambling: { freeMin: 0, paidMin: 0 },
+    };
   } else {
     st.counters.porn = st.counters.porn || { freeMin: 0, paidMin: 0 };
     st.counters.gambling = st.counters.gambling || { freeMin: 0, paidMin: 0 };
@@ -91,23 +123,54 @@ function initCounters(st, today) {
 }
 
 async function refreshActive() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tabs?.[0]?.url) { active.category = null; try { chrome.action.setBadgeText({ text: "" }); } catch {}; return; }
+  const tabs = await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+  });
+  if (!tabs?.[0]?.url) {
+    active.category = null;
+    try {
+      chrome.action.setBadgeText({ text: "" });
+    } catch {}
+    return;
+  }
 
   const tab = tabs[0];
   const st = await get(["categoriesOn", "blocklist"]);
   const host = hostFromUrl(tab.url);
 
   // Simple blocklist (supports "*.example.com")
-  const blocked = (st.blocklist || []).some(p => p.startsWith("*.") ? host.endsWith(p.slice(1)) : (host === p || host.endsWith("." + p)));
-  if (blocked) { active.category = null; try { chrome.action.setBadgeText({ text: "" }); } catch {}; return; }
+  const blocked = (st.blocklist || []).some((p) =>
+    p.startsWith("*.")
+      ? host.endsWith(p.slice(1))
+      : host === p || host.endsWith("." + p)
+  );
+  if (blocked) {
+    active.category = null;
+    try {
+      chrome.action.setBadgeText({ text: "" });
+    } catch {}
+    return;
+  }
 
   const cat = detectCategory(host);
-  if (!cat || !st.categoriesOn?.[cat]) { active.category = null; try { chrome.action.setBadgeText({ text: "" }); } catch {}; return; }
+  if (!cat || !st.categoriesOn?.[cat]) {
+    active.category = null;
+    try {
+      chrome.action.setBadgeText({ text: "" });
+    } catch {}
+    return;
+  }
 
   const now = Date.now();
   if (active.category !== cat || active.host !== host) {
-    active = { category: cat, host, domain: host, sinceTs: now, lastTickTs: now };
+    active = {
+      category: cat,
+      host,
+      domain: host,
+      sinceTs: now,
+      lastTickTs: now,
+    };
   } else {
     active.lastTickTs = now;
   }
@@ -126,7 +189,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
     if (!st.enabled) return;
 
-    const idleState = await new Promise(res => chrome.idle.queryState(IDLE_CUTOFF_SECONDS, res));
+    const idleState = await new Promise((res) =>
+      chrome.idle.queryState(IDLE_CUTOFF_SECONDS, res)
+    );
     if (idleState !== "active") return;
 
     if (!active.category) return;
@@ -139,53 +204,70 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const cat = active.category;
     const grace = st.grace?.[cat] ?? 0;
     const floor = st.floors?.[cat] ?? 0;
-    const rate  = Math.max(st.rates?.[cat] ?? 0, floor);
+    const rate = Math.max(st.rates?.[cat] ?? 0, floor);
 
     const freeUsed = st.counters?.[cat]?.freeMin ?? 0;
     const paidUsed = st.counters?.[cat]?.paidMin ?? 0;
-    try { console.log(`[ViceBank] tick: cat=${cat}, free=${freeUsed}, paid=${paidUsed}, grace=${grace}`); } catch {}
+    try {
+      console.log(
+        `[ViceBank] tick: cat=${cat}, free=${freeUsed}, paid=${paidUsed}, grace=${grace}`
+      );
+    } catch {}
 
     if (freeUsed < grace) {
-      // Count one free minute
+      // --- Count one free minute locally ---
       st.counters[cat].freeMin = freeUsed + 1;
       await set({ counters: st.counters });
+
+      // --- Sync to backend ---
+      await syncMinuteToBackend(st, active.url, cat);
+
       try {
-        const total = (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
+        const total =
+          (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
         chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); // green for free
         chrome.action.setBadgeText({ text: `${total}` });
       } catch {}
 
-      // 80% grace warning — FIXED the Python-style line to a JS ternary
+      // 80% grace warning
       const threshold = grace > 0 ? Math.ceil(0.8 * grace) : 0;
       if (grace > 0 && st.counters[cat].freeMin === threshold) {
         chrome.notifications.create(`vb_warn_${cat}`, {
           type: "basic",
           iconUrl: "assets/icon128.png",
           title: "ViceBank — Grace Warning",
-          message: `You're at 80% of your ${cat} grace (${grace} min/day).`
+          message: `You're at 80% of your ${cat} grace (${grace} min/day).`,
         });
       }
     } else {
-      // Past grace
+      // --- Past grace ---
       if (!st.paidActive?.[cat]) {
         // Prompt to continue paid or stop
-        const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        const tabs = await chrome.tabs.query({
+          active: true,
+          lastFocusedWindow: true,
+        });
         if (tabs?.[0]) {
           chrome.tabs.sendMessage(tabs[0].id, {
             type: "VB_SHOW_MODAL",
             category: cat,
             rate,
-            domain: active.domain
+            domain: active.domain,
           });
         }
         return; // wait for user action
       }
 
-      // User chose to keep paying — tick a local paid minute for UI
+      // --- User chose to keep paying: tick paid minute ---
       st.counters[cat].paidMin = paidUsed + 1;
       await set({ counters: st.counters });
+
+      // --- Sync to backend (paid minute) ---
+      await syncMinuteToBackend(st, active.url, cat);
+
       try {
-        const total = (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
+        const total =
+          (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
         chrome.action.setBadgeBackgroundColor({ color: "#e53935" }); // red for paid
         chrome.action.setBadgeText({ text: `${total}` });
       } catch {}
@@ -215,11 +297,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await set({ paidActive: st.paidActive });
 
         // Compute minutes so far (today) and charge now
-        const free  = st.counters?.[cat]?.freeMin ?? 0;
-        const paid  = st.counters?.[cat]?.paidMin ?? 0;
+        const free = st.counters?.[cat]?.freeMin ?? 0;
+        const paid = st.counters?.[cat]?.paidMin ?? 0;
         const minutesSoFar = free + paid;
         const grace = st.grace?.[cat] ?? 0;
-        const rate  = st.rates?.[cat] ?? 0;
+        const rate = st.rates?.[cat] ?? 0;
 
         try {
           const resp = await fetch(`${st.backendBaseUrl}/api/charge`, {
@@ -230,9 +312,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               category: cat,
               minutes: minutesSoFar,
               grace,
-              rate
+              rate,
               // paymentMethodId: "pm_card_visa" // optional override; server defaults in test
-            })
+            }),
           });
 
           const data = await resp.json().catch(() => ({}));
@@ -248,9 +330,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               type: "basic",
               iconUrl: "assets/icon128.png",
               title: "ViceBank — Charge created",
-              message: data?.amountCents > 0
-                ? `Charged $${(data.amountCents/100).toFixed(2)} for today's ${cat} usage.`
-                : `No charge (within grace).`
+              message:
+                data?.amountCents > 0
+                  ? `Charged $${(data.amountCents / 100).toFixed(
+                      2
+                    )} for today's ${cat} usage.`
+                  : `No charge (within grace).`,
             });
           } catch {}
 
@@ -264,7 +349,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg?.type === "VB_STOP_AND_LEAVE") {
-        try { chrome.tabs.create({ url: "chrome://newtab" }); } catch {}
+        try {
+          chrome.tabs.create({ url: "chrome://newtab" });
+        } catch {}
         sendResponse({ ok: true });
         return;
       }
@@ -281,7 +368,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       // Unknown message
-      sendResponse({ ok: false, error: "unknown message type", type: msg?.type });
+      sendResponse({
+        ok: false,
+        error: "unknown message type",
+        type: msg?.type,
+      });
     } catch (err) {
       console.error("[ViceBank] message handler error:", err);
       sendResponse({ ok: false, error: String(err) });
