@@ -1,3 +1,5 @@
+import { set } from "./storage.js";
+
 export function hostFromUrl(url) {
   try {
     const u = new URL(url);
@@ -34,16 +36,47 @@ export function uuidv4() {
     ).toString(16)
   );
 }
+// utils.js
+export async function ensureSession(st) {
+  if (!st.userId) st.userId = uuidv4();
+
+  if (!st.sessionId || st.sessionDate !== todayLocalISO()) {
+    st.sessionId = `session_${todayLocalISO()}`;
+    st.sessionDate = todayLocalISO();
+
+    // register session in backend
+    await fetch(`${st.backendBaseUrl}/api/session/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: st.userId,
+        sessionId: st.sessionId,
+        extensionVersion: st.extensionVersion,
+        tzOffsetMinutes: new Date().getTimezoneOffset(),
+      }),
+    });
+  }
+
+  await set({
+    userId: st.userId,
+    sessionId: st.sessionId,
+    sessionDate: st.sessionDate,
+  });
+
+  return st;
+}
 
 // ---------- Helper to send tick to backend ----------
 export async function syncMinuteToBackend(st, url, category) {
   try {
+    st = await ensureSession(st); // <-- make sure backend knows session
+
     const payload = {
       userId: st.userId,
-      sessionId: st.sessionId || `session_${todayLocalISO()}`,
+      sessionId: st.sessionId,
       events: [{ url, seconds: 60, category }],
     };
-    console.log("st backend base url", st.backendBaseUrl);
+    console.log("payload = ", payload);
     const res = await fetch(`${st.backendBaseUrl}/api/track`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

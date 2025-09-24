@@ -50,7 +50,7 @@ agreeBtn.onclick = async () => {
   const tosText = `ViceBank ToS and Billing Policy v1 — grace ${grace}, rates porn ${ratePorn}, gambling ${rateGambling}`;
   const tosHash = await sha256Hex(tosText);
 
-  const backendBaseUrl = backendInput.value || "http://localhost:4242";
+  const backendBaseUrl = "http://localhost:4242";
   await set({
     backendBaseUrl,
     grace: { porn: grace, gambling: grace },
@@ -91,7 +91,7 @@ agreeBtn.onclick = async () => {
 // Load current values
 (async function init() {
   const st = await get(null);
-  backendInput.value = st.backendBaseUrl || "http://localhost:4242";
+  //backendInput.value = st.backendBaseUrl || "http://localhost:4242";
   // Show as mm:ss; default 3:00
   const g = st.grace?.porn ?? 3;
   graceInput.value = `${String(g).padStart(1, "0")}:00`;

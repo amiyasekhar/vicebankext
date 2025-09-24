@@ -168,6 +168,7 @@ async function refreshActive() {
       category: cat,
       host,
       domain: host,
+      url: tab.url,
       sinceTs: now,
       lastTickTs: now,
     };

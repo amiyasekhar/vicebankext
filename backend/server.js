@@ -241,6 +241,9 @@ app.post("/api/session/start", (req, res) => {
 
 app.post("/api/track", (req, res) => {
   const { userId, sessionId, events } = req.body || {};
+  console.log("user id in backend = ", userId);
+  console.log("session id in backend = ", sessionId);
+  console.log("is events an array = ", Array.isArray(events));
   if (!userId || !sessionId || !Array.isArray(events)) {
     return res
       .status(400)
