@@ -1,4 +1,3 @@
-
 import { get, set } from "../lib/storage.js";
 import { sha256Hex } from "../lib/util.js";
 
@@ -20,20 +19,32 @@ function parseGraceToMinutes(val) {
     return Math.max(0, Math.min(3, totalMin));
   }
   const asNum = Number(str);
-  if (Number.isFinite(asNum)) return Math.max(0, Math.min(3, Math.floor(asNum)));
+  if (Number.isFinite(asNum))
+    return Math.max(0, Math.min(3, Math.floor(asNum)));
   return 0;
 }
 
 function validateChecks() {
-  const all = Array.from(document.querySelectorAll(".checks input[type=checkbox]")).every(c => c.checked);
+  const all = Array.from(
+    document.querySelectorAll(".checks input[type=checkbox]")
+  ).every((c) => c.checked);
   agreeBtn.disabled = !all;
-}
-document.querySelectorAll(".checks input[type=checkbox]").forEach(c => c.addEventListener("change", validateChecks));
 
+  agreeBtn.classList.toggle("disabled", !all);
+}
+
+// Attach listeners and run initial check
+document.addEventListener("DOMContentLoaded", () => {
+  document
+    .querySelectorAll(".checks input[type=checkbox]")
+    .forEach((c) => c.addEventListener("change", validateChecks));
+
+  validateChecks();
+});
 agreeBtn.onclick = async () => {
   const grace = parseGraceToMinutes(graceInput.value);
-  let ratePorn = Math.max(0.05, Number(ratePornInput.value||0));
-  let rateGambling = Math.max(0.50, Number(rateGamblingInput.value||0));
+  let ratePorn = Math.max(0.05, Number(ratePornInput.value || 0));
+  let rateGambling = Math.max(0.5, Number(rateGamblingInput.value || 0));
 
   const st = await get(null);
   const tosText = `ViceBank ToS and Billing Policy v1 — grace ${grace}, rates porn ${ratePorn}, gambling ${rateGambling}`;
@@ -43,7 +54,7 @@ agreeBtn.onclick = async () => {
   await set({
     backendBaseUrl,
     grace: { porn: grace, gambling: grace },
-    rates: { porn: ratePorn, gambling: rateGambling }
+    rates: { porn: ratePorn, gambling: rateGambling },
   });
 
   // Register consent with backend (server captures IP/UA)
@@ -57,8 +68,8 @@ agreeBtn.onclick = async () => {
         grace,
         rates: { porn: ratePorn, gambling: rateGambling },
         categoriesOn: { porn: true, gambling: true },
-        tosHash
-      })
+        tosHash,
+      }),
     });
   } catch (e) {
     console.warn("Consent post failed", e);
@@ -66,7 +77,9 @@ agreeBtn.onclick = async () => {
 
   // Create Stripe customer/subscription and return portal URL
   let email = null;
-  try { email = (await chrome.identity.getProfileUserInfo?.())?.email || null; } catch {}
+  try {
+    email = (await chrome.identity.getProfileUserInfo?.())?.email || null;
+  } catch {}
   chrome.runtime.sendMessage({ type: "VB_REGISTER_BACKEND", email }, (r) => {
     if (r?.portalUrl) {
       chrome.tabs.create({ url: r.portalUrl });
@@ -83,5 +96,5 @@ agreeBtn.onclick = async () => {
   const g = st.grace?.porn ?? 3;
   graceInput.value = `${String(g).padStart(1, "0")}:00`;
   ratePornInput.value = st.rates?.porn ?? 0.05;
-  rateGamblingInput.value = st.rates?.gambling ?? 0.50;
+  rateGamblingInput.value = st.rates?.gambling ?? 0.5;
 })();
