@@ -30,7 +30,9 @@ app.use(morgan("dev"));
 
 // IMPORTANT: Stripe webhook must see the raw body.
 // Register the webhook route BEFORE express.json().
+console.log("proce");
 const stripeSecret = process.env.STRIPE_SECRET_KEY || "";
+console.log("stripe key ", stripeSecret);
 let stripe = null;
 if (stripeSecret) {
   stripe = new Stripe(stripeSecret, { apiVersion: "2023-10-16" });
@@ -209,6 +211,53 @@ app.get("/landing", (_req, res) =>
 app.get("/landing-dynamic", (_req, res) =>
   res.sendFile(path.join(publicDir, "landing-dynamic.html"))
 );
+
+app.post("/api/stripe/setup-intent", async (req, res) => {
+  if (!stripe)
+    return res
+      .status(500)
+      .json({ error: "Stripe not configured. Set STRIPE_SECRET_KEY." });
+
+  try {
+    const { userId } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "userId required" });
+
+    // Create SetupIntent so user can add a payment method without charging
+    const setupIntent = await stripe.setupIntents.create({
+      payment_method_types: ["card"],
+      metadata: { userId },
+    });
+
+    return res.json({ clientSecret: setupIntent.client_secret });
+  } catch (err) {
+    console.error("Failed to create SetupIntent:", err);
+    return res.status(400).json({ error: String(err.message) });
+  }
+});
+
+// Create a Stripe Checkout Session (for adding a payment method)
+app.post("/api/stripe/checkout-session", async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: "Stripe not configured" });
+
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "setup", // user is adding a payment method
+      payment_method_types: ["card"],
+      success_url:
+        "http://localhost:4242/checkout-success.html?session_id={CHECKOUT_SESSION_ID}",
+      cancel_url: "http://localhost:4242/checkout-cancel.html",
+      metadata: { userId },
+    });
+
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error("Checkout session failed:", err);
+    res.status(400).json({ error: String(err.message) });
+  }
+});
 
 /* -------------------- session + tracking -------------------- */
 app.post("/api/session/start", (req, res) => {
