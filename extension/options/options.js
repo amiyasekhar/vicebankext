@@ -49,7 +49,7 @@ function validateChecks() {
 // ------------------ Consent + Stripe Flow ------------------
 async function onAgreeAndContinue(userId, opts) {
   try {
-    // Step 1: record consent
+    // Step 1: record conse
     const res = await fetch(`${backendBaseUrl}/api/consent`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -137,3 +137,145 @@ agreeBtn.onclick = async () => {
     rates: { porn: ratePorn, gambling: rateGambling },
   });
 };
+
+let active = {
+  category: null,
+  domain: null,
+  host: null,
+  sinceTs: 0,
+  lastTickTs: 0,
+};
+
+// --- web timer state (moved here) ---
+let webTimerInterval = null;
+let webTimerSeconds = 0;
+
+function startWebTimer() {
+  if (webTimerInterval) return;
+  webTimerSeconds = 0;
+  console.log("[ViceBank][WebTimer] start", {
+    category: active?.category,
+    host: active?.host,
+    sinceTs: active?.sinceTs,
+  });
+  webTimerInterval = setInterval(() => {
+    try {
+      if (!active?.category) {
+        stopWebTimer();
+        return;
+      }
+      webTimerSeconds++;
+      if (webTimerSeconds % 5 === 0) {
+        console.log("[ViceBank][WebTimer] tick", {
+          seconds: webTimerSeconds,
+          category: active.category,
+          host: active.host,
+          url: active.url,
+        });
+      }
+      try {
+        chrome.action.setBadgeText({ text: String(webTimerSeconds % 60) });
+      } catch {}
+    } catch (err) {
+      console.error("[ViceBank][WebTimer] error:", err);
+    }
+  }, 1000);
+}
+
+function stopWebTimer() {
+  if (!webTimerInterval) return;
+  clearInterval(webTimerInterval);
+  webTimerInterval = null;
+  console.log("[ViceBank][WebTimer] stopped after seconds=", webTimerSeconds, {
+    lastCategory: active?.category,
+    lastHost: active?.host,
+  });
+  webTimerSeconds = 0;
+  try {
+    chrome.action.setBadgeText({ text: "" });
+  } catch {}
+}
+
+// --- Refresh active tab info (new) ---
+async function refreshActive() {
+  const tabs = await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+  });
+  if (!tabs?.[0]?.url) {
+    console.log("[ViceBank][WebTimer] refreshActive: no active tab/url");
+    active.category = null;
+    try {
+      chrome.action.setBadgeText({ text: "" });
+    } catch {}
+    // stop web timer when no restricted tab
+    stopWebTimer();
+    return;
+  }
+
+  const tab = tabs[0];
+  const st = await get(["categoriesOn", "blocklist"]);
+  const host = hostFromUrl(tab.url);
+
+  // Simple blocklist (supports "*.example.com")
+  const blocked = (st.blocklist || []).some((p) =>
+    p.startsWith("*.")
+      ? host.endsWith(p.slice(1))
+      : host === p || host.endsWith("." + p)
+  );
+  if (blocked) {
+    console.log("[ViceBank][WebTimer] refreshActive: host blocked", host);
+    active.category = null;
+    try {
+      chrome.action.setBadgeText({ text: "" });
+    } catch {}
+    stopWebTimer();
+    return;
+  }
+
+  const cat = detectCategory(host);
+  if (!cat || !st.categoriesOn?.[cat]) {
+    console.log(
+      "[ViceBank][WebTimer] refreshActive: not a tracked category",
+      host,
+      cat
+    );
+    active.category = null;
+    try {
+      chrome.action.setBadgeText({ text: "" });
+    } catch {}
+    stopWebTimer();
+    return;
+  }
+
+  const now = Date.now();
+  if (active.category !== cat || active.host !== host) {
+    active = {
+      category: cat,
+      host,
+      domain: host,
+      url: tab.url,
+      sinceTs: now,
+      lastTickTs: now,
+    };
+    // start immediate web timer on new restricted site visit
+    startWebTimer();
+  } else {
+    active.lastTickTs = now;
+    // ensure timer runs while staying on same site
+    if (!webTimerInterval) startWebTimer();
+  }
+}
+
+// --- quick listeners to detect visits immediately (moved to service worker) ---
+chrome.tabs.onActivated.addListener(() => {
+  refreshActive().catch((e) => console.error("[ViceBank] onActivated:", e));
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" || changeInfo.url) {
+    refreshActive().catch((e) => console.error("[ViceBank] onUpdated:", e));
+  }
+});
+chrome.windows.onFocusChanged.addListener(() => {
+  refreshActive().catch((e) => console.error("[ViceBank] onFocusChanged:", e));
+});

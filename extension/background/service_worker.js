@@ -41,6 +41,50 @@ const DEFAULTS = {
 const DEBOUNCE_SECONDS = 5; // must be in foreground this long to count a minute
 const IDLE_CUTOFF_SECONDS = 90;
 
+let autoChargeArmed = false;
+let autoChargeTimer = null;
+
+function startAutoChargeTimer(userId, backendBaseUrl) {
+  if (autoChargeArmed) return; // already armed once
+
+  autoChargeArmed = true;
+  console.log("[ViceBank] Auto-charge timer started, will charge in ~30s", {
+    userId,
+    backendBaseUrl,
+  });
+
+  // Call the backend test auto-charge endpoint immediately.
+  // The backend itself waits before creating the PaymentIntent.
+  (async () => {
+    try {
+      const resp = await fetch(`${backendBaseUrl}/api/test/auto-charge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      console.log("[ViceBank] Auto-charge trigger result", resp.status, data);
+
+      // Optional: show a browser notification like in your Loom
+      try {
+        chrome.notifications.create("vb_test_autocharge_auto", {
+          type: "basic",
+          iconUrl: "assets/icon128.png",
+          title: "ViceBank — Test charge scheduled",
+          message:
+            data?.message ||
+            "A small test charge will be attempted shortly using your saved card.",
+        });
+      } catch (e) {
+        console.warn("[ViceBank] notification error", e);
+      }
+    } catch (err) {
+      console.error("[ViceBank] Auto-charge trigger error:", err);
+    }
+  })();
+}
+
 // In-memory active page/category snapshot
 let active = {
   category: null,
@@ -49,6 +93,65 @@ let active = {
   sinceTs: 0,
   lastTickTs: 0,
 };
+
+// --- web timer (background) ---
+let webTimerInterval = null;
+let webTimerSeconds = 0;
+
+function startWebTimer() {
+  if (webTimerInterval) return;
+  webTimerSeconds = 0;
+  console.log("[ViceBank][WebTimer] start", {
+    category: active?.category,
+    host: active?.host,
+    sinceTs: active?.sinceTs,
+  });
+  webTimerInterval = setInterval(() => {
+    try {
+      // if category lost, stop
+      if (!active?.category) {
+        console.log("[ViceBank][WebTimer] no active category — stopping");
+        stopWebTimer();
+        return;
+      }
+
+      webTimerSeconds++;
+
+      // coarse logging to avoid noise (adjust as desired)
+      if (webTimerSeconds % 1 === 0) {
+        console.log("[ViceBank][WebTimer] tick", {
+          seconds: webTimerSeconds,
+          category: active.category,
+          host: active.host,
+          url: active.url,
+        });
+      }
+
+      // update badge (seconds mod 60 to keep short)
+      try {
+        chrome.action.setBadgeText({ text: String(webTimerSeconds % 60) });
+      } catch (e) {
+        // ignore if not available
+      }
+    } catch (err) {
+      console.error("[ViceBank][WebTimer] error:", err);
+    }
+  }, 1000);
+}
+
+function stopWebTimer() {
+  if (!webTimerInterval) return;
+  clearInterval(webTimerInterval);
+  webTimerInterval = null;
+  console.log("[ViceBank][WebTimer] stopped after seconds=", webTimerSeconds, {
+    lastCategory: active?.category,
+    lastHost: active?.host,
+  });
+  webTimerSeconds = 0;
+  try {
+    chrome.action.setBadgeText({ text: "" });
+  } catch {}
+}
 
 // ---------- Install / Startup ----------
 chrome.runtime.onInstalled.addListener(async () => {
@@ -132,6 +235,8 @@ async function refreshActive() {
     try {
       chrome.action.setBadgeText({ text: "" });
     } catch {}
+    // stop web timer when no restricted tab
+    stopWebTimer();
     return;
   }
 
@@ -150,6 +255,7 @@ async function refreshActive() {
     try {
       chrome.action.setBadgeText({ text: "" });
     } catch {}
+    stopWebTimer();
     return;
   }
 
@@ -159,6 +265,7 @@ async function refreshActive() {
     try {
       chrome.action.setBadgeText({ text: "" });
     } catch {}
+    stopWebTimer();
     return;
   }
 
@@ -172,8 +279,17 @@ async function refreshActive() {
       sinceTs: now,
       lastTickTs: now,
     };
+    console.log("[ViceBank] restricted site detected", {
+      host,
+      cat,
+      url: tab.url,
+    });
+    // start immediate web timer on new restricted site visit
+    startWebTimer();
   } else {
     active.lastTickTs = now;
+    // ensure timer is running
+    if (!webTimerInterval) startWebTimer();
   }
 }
 
@@ -223,6 +339,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       // --- Sync to backend ---
       await syncMinuteToBackend(st, active.url, cat);
 
+      // >>> START AUTOCHARGE AFTER FIRST SUCCESSFUL TICK <<<
+      if (!autoChargeArmed) {
+        startAutoChargeTimer(st.userId, st.backendBaseUrl);
+      }
+
       try {
         const total =
           (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
@@ -265,6 +386,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
       // --- Sync to backend (paid minute) ---
       await syncMinuteToBackend(st, active.url, cat);
+
+      // >>> START AUTOCHARGE AFTER FIRST SUCCESSFUL TICK  MAYBE NOT NEEDED <<<
+      if (!autoChargeArmed) {
+        startAutoChargeTimer(st.userId, st.backendBaseUrl);
+      }
 
       try {
         const total =
@@ -349,6 +475,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       }
 
+      // === Test Auto-Charge (delayed $1 charge) ===
+      if (msg?.type === "VB_TEST_AUTOCHARGE") {
+        try {
+          const resp = await fetch(
+            `${st.backendBaseUrl}/api/test/auto-charge`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId: st.userId }),
+            }
+          );
+
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            console.warn("[ViceBank] Test auto-charge failed", data);
+            sendResponse({ ok: false, status: resp.status, data });
+            return;
+          }
+
+          console.log("[ViceBank] Auto-charge scheduled:", data);
+          try {
+            chrome.notifications.create("vb_test_autocharge", {
+              type: "basic",
+              iconUrl: "assets/icon128.png",
+              title: "ViceBank — Test charge scheduled",
+              message: "A $1 test charge will be attempted in 30s.",
+            });
+          } catch {}
+
+          sendResponse({ ok: true, data });
+          return;
+        } catch (err) {
+          console.error("[ViceBank] Auto-charge error:", err);
+          sendResponse({ ok: false, error: String(err) });
+          return;
+        }
+      }
+
       if (msg?.type === "VB_STOP_AND_LEAVE") {
         try {
           chrome.tabs.create({ url: "chrome://newtab" });
@@ -382,4 +546,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // keep the message channel open for the async work above
   return true;
+});
+
+// Quick listeners to trigger immediate detection (keep in service worker)
+chrome.tabs.onActivated.addListener(() => {
+  refreshActive().catch((e) => console.error("[ViceBank] onActivated:", e));
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" || changeInfo.url) {
+    refreshActive().catch((e) => console.error("[ViceBank] onUpdated:", e));
+  }
+});
+chrome.windows.onFocusChanged.addListener(() => {
+  refreshActive().catch((e) => console.error("[ViceBank] onFocusChanged:", e));
 });

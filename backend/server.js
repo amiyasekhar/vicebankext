@@ -30,33 +30,92 @@ app.use(morgan("dev"));
 
 // IMPORTANT: Stripe webhook must see the raw body.
 // Register the webhook route BEFORE express.json().
-console.log("proce");
 const stripeSecret = process.env.STRIPE_SECRET_KEY || "";
 console.log("stripe key ", stripeSecret);
 let stripe = null;
 if (stripeSecret) {
-  stripe = new Stripe(stripeSecret, { apiVersion: "2023-10-16" });
+  stripe = new Stripe(stripeSecret);
+  // stripe = new Stripe(stripeSecret, { apiVersion: "2024-10-28" });
 } else {
   console.warn(
     "[vicebank] STRIPE_SECRET_KEY not set. Weekly settlement disabled."
   );
 }
+
+app.use((req, res, next) => {
+  if (req.originalUrl === "/api/webhook") return next();
+  express.json()(req, res, next);
+});
+
 app.post(
   "/api/webhook",
-  bodyParser.raw({ type: "application/json" }),
-  (req, res) => {
+  bodyParser.raw({ type: "application/json" }), // Must be raw for Stripe signature verification
+  async (req, res) => {
+    console.log("[Webhook HIT]");
+    console.log("Headers:", req.headers);
+    console.log("Raw body:", req.body.toString()); // Buffer → string
+
     if (!stripe)
       return res.status(200).json({ received: true, disabled: true });
+
     const sig = req.headers["stripe-signature"];
+    let event;
+    console.log("secret = ", process.env.STRIPE_WEBHOOK_SECRET);
     try {
-      const event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-      // TODO: handle charge.succeeded, charge.refunded, charge.dispute.created, etc.
+      if (process.env.STRIPE_WEBHOOK_SECRET) {
+        // Production/verification mode
+        event = stripe.webhooks.constructEvent(
+          req.body, // raw Buffer
+          sig, // stripe-signature header
+          process.env.STRIPE_WEBHOOK_SECRET
+        );
+      } else {
+        // Local dev: skip signature verification
+        event = JSON.parse(req.body.toString());
+        console.log(
+          "[Webhook] STRIPE_WEBHOOK_SECRET not set; skipping signature verification."
+        );
+      }
+
+      // ===== Handle events =====
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object;
+          const userId = session.metadata.userId;
+          const customerId = session.customer;
+          const snap = consents.get(userId) || {};
+          consents.set(userId, { ...snap, customerId });
+          console.log(`[Webhook] Saved customerId for user ${userId}`);
+          break;
+        }
+        case "setup_intent.succeeded": {
+          const setupIntent = event.data.object;
+          const userId = setupIntent.metadata.userId;
+          const customerId = setupIntent.customer;
+          const paymentMethodId = setupIntent.payment_method;
+
+          // Attach payment method
+          await stripe.paymentMethods.attach(paymentMethodId, {
+            customer: customerId,
+          });
+
+          // Make it default
+          await stripe.customers.update(customerId, {
+            invoice_settings: { default_payment_method: paymentMethodId },
+          });
+
+          const snap = consents.get(userId) || {};
+          consents.set(userId, { ...snap, customerId, paymentMethodId });
+          console.log(`[Webhook] SetupIntent succeeded for user ${userId}`);
+          break;
+        }
+        default:
+          console.log(`[Webhook] Unhandled event type: ${event.type}`);
+      }
+
       return res.json({ received: true, type: event.type });
     } catch (err) {
+      console.error("[Webhook Error]", err);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
   }
@@ -246,16 +305,73 @@ app.post("/api/stripe/checkout-session", async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "setup", // user is adding a payment method
       payment_method_types: ["card"],
+      customer_creation: "always",
       success_url:
         "http://localhost:4242/checkout-success.html?session_id={CHECKOUT_SESSION_ID}",
       cancel_url: "http://localhost:4242/checkout-cancel.html",
       metadata: { userId },
     });
 
+    console.log("session.intent", session.setup_intent);
+    console.log("sesion.payment_status", session.payment_status);
+
     res.json({ url: session.url });
   } catch (err) {
     console.error("Checkout session failed:", err);
     res.status(400).json({ error: String(err.message) });
+  }
+});
+
+app.post("/api/stripe/checkout-success", async (req, res) => {
+  const { session_id } = req.body;
+  if (!session_id)
+    return res.status(400).json({ error: "session_id required" });
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(session_id, {
+      expand: ["setup_intent.payment_method"],
+    });
+
+    console.log("checkout session", session);
+
+    const paymentMethodId = session.setup_intent?.payment_method?.id;
+    const customerId = session.customer;
+    const userId = session.metadata?.userId; // 🔹 get userId back
+
+    if (!paymentMethodId || !customerId)
+      return res.status(400).json({ error: "No payment method found" });
+
+    // Attach payment method to customer
+    await stripe.paymentMethods.attach(paymentMethodId, {
+      customer: customerId,
+    });
+
+    // Set as default
+    await stripe.customers.update(customerId, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+
+    // 🔹 Persist this in consents so getOrCreateCustomer() can find it later
+    if (userId) {
+      const snap = consents.get(userId) || {};
+      consents.set(userId, {
+        ...snap,
+        customerId,
+        paymentMethodId,
+      });
+      console.log(
+        `[Checkout Success] Saved customerId/paymentMethodId for user ${userId}`
+      );
+    } else {
+      console.warn(
+        "[Checkout Success] No userId in session.metadata; cannot map customer to user"
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Checkout success processing failed:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -368,6 +484,20 @@ app.get("/api/counters/today", (req, res) => {
 /* -------------------- weekly settlement -------------------- */
 const STRIPE_MIN_CENTS = 50;
 const CATEGORY_FLOORS = { porn: 0.05, gambling: 0.5 }; // $/min floors
+
+async function getOrCreateCustomer(userId) {
+  if (!stripe) throw new Error("Stripe not configured");
+  let snap = consents.get(userId);
+  if (snap?.customerId) {
+    return snap.customerId;
+  }
+
+  const customer = await stripe.customers.create({
+    metadata: { userId },
+  });
+  consents.set(userId, { ...snap, customerId: customer.id });
+  return customer.id;
+}
 
 function parseUserIdAndDay(key) {
   const idx = key.lastIndexOf("::");
@@ -492,7 +622,7 @@ async function chargeWeeklyIfEligible({
     {
       amount: grandTotal,
       currency: "usd",
-      payment_method: pm,
+      //payment_method: snap.customerId, //pm,
       confirm: true,
       automatic_payment_methods: { enabled: true, allow_redirects: "never" },
       metadata: {
@@ -595,6 +725,54 @@ app.post("/api/settle/week", async (req, res) => {
   }
 });
 
+// TEST: monitor for 30s then auto charge
+app.post("/api/test/auto-charge", async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  try {
+    const customerId = await getOrCreateCustomer(userId);
+    // Immediately tell frontend "started"
+    res.json({ ok: true, message: "Monitoring started, will charge in 30s" });
+
+    const customer = await stripe.customers.retrieve(customerId);
+    console.log("customer in auto charge test route ", customer);
+    const paymentMethods = await stripe.paymentMethods.list({
+      customer: customerId,
+      type: "card",
+    });
+
+    console.log(
+      "Customer default payment method:",
+      customer.invoice_settings.default_payment_method
+    );
+    console.log("All saved cards:", paymentMethods.data);
+
+    // After 15 seconds, create a $0.51 charge (for testing)
+    setTimeout(async () => {
+      try {
+        const pi = await stripe.paymentIntents.create({
+          amount: 51, // $0.51
+          currency: "usd",
+          customer: customerId,
+          payment_method: customer.invoice_settings.default_payment_method,
+          off_session: true,
+          confirm: true,
+          automatic_payment_methods: { enabled: true },
+          metadata: { userId, reason: "ViceBank test auto-charge" },
+        });
+        console.log(
+          `[TEST] Charged user ${userId}: PaymentIntent ${pi.id}, status=${pi.status}`
+        );
+      } catch (err) {
+        console.error("[TEST] Auto-charge failed:", err.message);
+      }
+    }, 15_000);
+  } catch (err) {
+    console.error(err);
+    return; // response already sent
+  }
+});
 /* -------------------- start -------------------- */
 const port = process.env.PORT || 4242;
 app.listen(port, () =>
