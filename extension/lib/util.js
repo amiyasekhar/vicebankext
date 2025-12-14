@@ -1,3 +1,4 @@
+import { set } from "./storage.js";
 
 export function hostFromUrl(url) {
   try {
@@ -19,16 +20,73 @@ export function todayLocalISO() {
 export function sha256Hex(str) {
   // Returns Promise<string>
   const enc = new TextEncoder().encode(str);
-  return crypto.subtle.digest("SHA-256", enc).then(buf => {
+  return crypto.subtle.digest("SHA-256", enc).then((buf) => {
     return Array.from(new Uint8Array(buf))
-      .map(b => b.toString(16).padStart(2, "0"))
+      .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
   });
 }
 
 export function uuidv4() {
   // RFC 4122 version 4
-  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+  return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c) =>
+    (
+      c ^
+      (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))
+    ).toString(16)
   );
+}
+// utils.js
+export async function ensureSession(st) {
+  if (!st.userId) st.userId = uuidv4();
+
+  if (!st.sessionId || st.sessionDate !== todayLocalISO()) {
+    st.sessionId = `session_${todayLocalISO()}`;
+    st.sessionDate = todayLocalISO();
+
+    // register session in backend
+    await fetch(`${st.backendBaseUrl}/api/session/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: st.userId,
+        sessionId: st.sessionId,
+        extensionVersion: st.extensionVersion,
+        tzOffsetMinutes: new Date().getTimezoneOffset(),
+      }),
+    });
+  }
+
+  await set({
+    userId: st.userId,
+    sessionId: st.sessionId,
+    sessionDate: st.sessionDate,
+  });
+
+  return st;
+}
+
+// ---------- Helper to send tick to backend ----------
+export async function syncMinuteToBackend(st, url, category) {
+  try {
+    st = await ensureSession(st); // <-- make sure backend knows session
+
+    const payload = {
+      userId: st.userId,
+      sessionId: st.sessionId,
+      events: [{ url, seconds: 60, category }],
+    };
+    console.log("payload = ", payload);
+    const res = await fetch(`${st.backendBaseUrl}/api/track`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) throw new Error(`Backend responded ${res.status}`);
+    const json = await res.json();
+    console.log("[ViceBank] Synced tick:", json);
+  } catch (err) {
+    console.warn("[ViceBank] Failed to sync tick:", err.message);
+  }
 }

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Payment Setup — ViceBank</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./css/checkout_success.css" />
+    <!-- adjust the href path depending on where you serve the CSS -->
+</head>
+
+<body>
+    <div class="wrap">
+        <div class="card" id="card">
+            <div class="status-pill" id="status-pill">
+                <span class="status-dot"></span>
+                <span id="status-label">Finishing setup…</span>
+            </div>
+
+            <h1 id="title">Payment Setup Successful!</h1>
+            <p id="subtitle">We’re securely linking your payment method to your ViceBank account.</p>
+
+            <p class="small">
+                This usually takes just a moment. Once complete, you'll be able to start using your accountability rules
+                and
+                charges will be handled automatically according to your settings.
+            </p>
+
+            <p class="status-message" id="detail-message">
+                Setting up your payment method…
+            </p>
+
+            <div class="cta-row">
+                <button class="btn-primary" id="primary-btn" disabled>
+                    <div class="spinner" id="spinner"></div>
+                    <span id="primary-btn-label">Completing setup…</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (async () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const session_id = urlParams.get('session_id');
+
+            const statusPill = document.getElementById('status-pill');
+            const statusLabel = document.getElementById('status-label');
+            const title = document.getElementById('title');
+            const subtitle = document.getElementById('subtitle');
+            const detail = document.getElementById('detail-message');
+            const spinner = document.getElementById('spinner');
+            const primaryBtn = document.getElementById('primary-btn');
+            const primaryLabel = document.getElementById('primary-btn-label');
+
+            const goHome = () => {
+                window.location.href = '/';
+            };
+
+            const goDashboard = () => {
+                window.location.href = '/dashboard'; // change if your dashboard route differs
+            };
+
+            if (!session_id) {
+                // No session id – show error
+                statusPill.classList.add('error');
+                statusLabel.textContent = 'Missing session';
+                title.textContent = 'We couldn’t verify your payment session';
+                subtitle.textContent = 'The checkout session information was not found in the URL.';
+                detail.textContent = 'Please return to the app and try starting the payment setup again.';
+                detail.classList.add('error');
+                spinner.style.display = 'none';
+                primaryBtn.disabled = false;
+                primaryLabel.textContent = 'Back to app';
+                primaryBtn.onclick = goHome;
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/stripe/checkout-success', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id }),
+                });
+
+                const data = await res.json();
+
+                spinner.style.display = 'none';
+                primaryBtn.disabled = false;
+
+                if (data.ok) {
+                    statusPill.classList.add('success');
+                    statusLabel.textContent = 'Payment method linked';
+                    title.textContent = 'You’re all set!';
+                    subtitle.textContent = 'Your payment method is now securely connected to ViceBank.';
+                    detail.textContent = 'You can now start using your accountability rules. Charges will apply automatically according to your configured minutes and rates.';
+                    detail.classList.add('success');
+                    primaryLabel.textContent = 'Go to dashboard';
+                    primaryBtn.onclick = goDashboard;
+                } else {
+                    statusPill.classList.add('error');
+                    statusLabel.textContent = 'Setup failed';
+                    title.textContent = 'Something went wrong linking your payment method';
+                    subtitle.textContent = 'We weren’t able to complete the payment setup with your provider.';
+                    detail.textContent = 'Details: ' + (data.error || 'Unknown error. Please retry from the app.');
+                    detail.classList.add('error');
+                    primaryLabel.textContent = 'Try again';
+                    primaryBtn.onclick = goHome;
+                }
+            } catch (err) {
+                spinner.style.display = 'none';
+                primaryBtn.disabled = false;
+
+                statusPill.classList.add('error');
+                statusLabel.textContent = 'Network error';
+                title.textContent = 'We couldn’t reach the payment service';
+                subtitle.textContent = 'There was a problem talking to our servers.';
+                detail.textContent = 'Error: ' + err.message + '. Please check your connection and retry from the app.';
+                detail.classList.add('error');
+                primaryLabel.textContent = 'Back to app';
+                primaryBtn.onclick = goHome;
+            }
+        })();
+    </script>
+</body>
+
+</html>
