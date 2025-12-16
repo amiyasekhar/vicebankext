@@ -153,6 +153,19 @@ app.use(express.static(publicDir));
 function dayKey(ts = Date.now()) {
   return new Date(ts).toISOString().slice(0, 10);
 } // YYYY-MM-DD
+
+function msUntilNextUTCMidnight() {
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0));
+  return Math.max(1000, next.getTime() - now.getTime());
+}
+
+function utcYesterdayStr() {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
+}
 function keyUserDay(userId, ts = Date.now()) {
   return `${userId}::${dayKey(ts)}`;
 }
@@ -173,6 +186,12 @@ const consents = new Map(); // userId -> { grace, rates, categoriesOn, ... }
 const sessions = new Map(); // sessionId -> { userId, startedAt, lastSeenAt, ... }
 const counters = new Map(); // key(userId,day) -> { updatedAt, byCategory, byDomain }
 const weeklyRolloversCents = new Map(); // userId -> cents (carry forward)
+const nightlyRolloversCents = new Map(); // userId -> cents (carry forward for nightly settlement)
+
+// Nightly settlement config (runs at UTC midnight to match dayKey() bucketing)
+const NIGHTLY_SETTLE_ENABLED =
+  String(process.env.NIGHTLY_SETTLE_ENABLED || "false") === "true";
+const NIGHTLY_SETTLE_MIN_CENTS = Number(process.env.NIGHTLY_SETTLE_MIN_CENTS || 50);
 
 /* -------------------- categorization (robust) -------------------- */
 const PORN_SEEDS = [
@@ -791,6 +810,113 @@ app.get("/api/dashboard", (req, res) => {
 const STRIPE_MIN_CENTS = 50;
 const CATEGORY_FLOORS = { porn: 0.05, gambling: 0.5 }; // $/min floors
 
+/* -------------------- nightly settlement (daily) -------------------- */
+function collectDailyBillableCents({ userId, dayStr }) {
+  const { grace, rates, categoriesOn } = getConsentSnapshot(userId);
+  const bucket = counters.get(`${userId}::${dayStr}`);
+  if (!bucket) return { perCat: {}, totalCents: 0 };
+
+  const perCat = {};
+  let totalCents = 0;
+
+  for (const cat of ["porn", "gambling"]) {
+    if (!categoriesOn?.[cat]) continue;
+    const wholeMins = Number(bucket?.byCategory?.[cat]?.minutes || 0);
+    const g = Math.max(0, Number(grace?.[cat] ?? 0));
+    const billable = Math.max(0, wholeMins - g);
+
+    const configured = Number(rates?.[cat] ?? 0);
+    const dollarsPerMin = Math.max(CATEGORY_FLOORS[cat] ?? 0, configured);
+    const centsPerMin = Math.round(dollarsPerMin * 100);
+    const cents = centsPerMin * billable;
+
+    perCat[cat] = { minutes: billable, centsPerMin, centsTotal: cents };
+    totalCents += cents;
+  }
+
+  return { perCat, totalCents };
+}
+
+async function settleNightlyForUser({ userId, dayStr }) {
+  if (!stripe) return { ok: false, error: "stripe_not_configured" };
+
+  const snap = consents.get(userId) || {};
+  const customerId = snap.customerId;
+  const paymentMethodId = snap.paymentMethodId;
+  if (!customerId || !paymentMethodId) {
+    return { ok: false, error: "missing_customer_or_payment_method" };
+  }
+
+  const { perCat, totalCents } = collectDailyBillableCents({ userId, dayStr });
+  const rollover = nightlyRolloversCents.get(userId) || 0;
+  const grandTotal = totalCents + rollover;
+
+  if (grandTotal < NIGHTLY_SETTLE_MIN_CENTS) {
+    nightlyRolloversCents.set(userId, grandTotal);
+    return { ok: true, charged: 0, carriedCents: grandTotal, reason: "below_minimum" };
+  }
+
+  const idemKey = `vb_nightly_${userId}_${dayStr}_${grandTotal}`;
+
+  const meta = { userId, day: dayStr, reason: "ViceBank nightly settlement" };
+  for (const [cat, v] of Object.entries(perCat)) {
+    meta[`minutes_${cat}`] = String(v.minutes);
+    meta[`centsPerMin_${cat}`] = String(v.centsPerMin);
+    meta[`cents_${cat}`] = String(v.centsTotal);
+  }
+  if (rollover > 0) meta["cents_rollover_applied"] = String(rollover);
+
+  const pi = await stripe.paymentIntents.create(
+    {
+      amount: grandTotal,
+      currency: "usd",
+      customer: customerId,
+      payment_method: paymentMethodId,
+      off_session: true,
+      confirm: true,
+      automatic_payment_methods: { enabled: true, allow_redirects: "never" },
+      metadata: meta,
+    },
+    { idempotencyKey: idemKey }
+  );
+
+  nightlyRolloversCents.set(userId, 0);
+  return { ok: true, charged: grandTotal, paymentIntentId: pi.id, status: pi.status };
+}
+
+async function runNightlySettlement({ dayStr } = {}) {
+  if (!NIGHTLY_SETTLE_ENABLED) return { ok: true, skipped: true, reason: "disabled" };
+  if (!stripe) return { ok: false, error: "stripe_not_configured" };
+
+  const targetDay = dayStr || utcYesterdayStr();
+  const userIds = Array.from(consents.keys());
+
+  console.log(`[vicebank] nightly settlement starting day=${targetDay}, users=${userIds.length}`);
+  const results = [];
+  for (const userId of userIds) {
+    try {
+      const r = await settleNightlyForUser({ userId, dayStr: targetDay });
+      results.push({ userId, ...r });
+      console.log("[vicebank] nightly settlement result", { userId, day: targetDay, ...r });
+    } catch (e) {
+      const err = String(e?.message || e);
+      results.push({ userId, ok: false, error: err });
+      console.error("[vicebank] nightly settlement error", { userId, day: targetDay, error: err });
+    }
+  }
+  return { ok: true, day: targetDay, results };
+}
+
+function scheduleNightlySettlement() {
+  if (!NIGHTLY_SETTLE_ENABLED) return;
+  const delay = msUntilNextUTCMidnight();
+  console.log(`[vicebank] nightly settlement scheduled in ${(delay / 1000).toFixed(0)}s (UTC midnight)`);
+  setTimeout(async () => {
+    await runNightlySettlement();
+    setInterval(() => runNightlySettlement().catch(() => {}), 24 * 60 * 60 * 1000);
+  }, delay);
+}
+
 async function getOrCreateCustomer(userId) {
   if (!stripe) throw new Error("Stripe not configured");
   let snap = consents.get(userId);
@@ -1031,6 +1157,17 @@ app.post("/api/settle/week", async (req, res) => {
   }
 });
 
+// Admin/testing: trigger nightly settlement manually
+app.post("/api/settle/nightly/run", async (req, res) => {
+  try {
+    const { day } = req.body || {};
+    const result = await runNightlySettlement({ dayStr: day });
+    return res.json(result);
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 // TEST: monitor for 30s then auto charge
 app.post("/api/test/auto-charge", async (req, res) => {
   const { userId } = req.body || {};
@@ -1084,3 +1221,6 @@ const port = process.env.PORT || 4242;
 app.listen(port, () =>
   console.log(`vicebank-backend (weekly) listening on http://localhost:${port}`)
 );
+
+// Start nightly scheduler (UTC midnight) if enabled via env
+scheduleNightlySettlement();
