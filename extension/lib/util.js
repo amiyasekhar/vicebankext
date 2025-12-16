@@ -40,21 +40,27 @@ export function uuidv4() {
 export async function ensureSession(st) {
   if (!st.userId) st.userId = uuidv4();
 
+  // Keep session stable per day
   if (!st.sessionId || st.sessionDate !== todayLocalISO()) {
     st.sessionId = `session_${todayLocalISO()}`;
     st.sessionDate = todayLocalISO();
+  }
 
-    // register session in backend
+  // Always (re)register session with backend in case backend restarted.
+  // This is safe/idempotent for the backend's in-memory session map.
+  try {
     await fetch(`${st.backendBaseUrl}/api/session/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         userId: st.userId,
         sessionId: st.sessionId,
-        extensionVersion: st.extensionVersion,
+        extensionVersion: chrome.runtime.getManifest().version,
         tzOffsetMinutes: new Date().getTimezoneOffset(),
       }),
     });
+  } catch (e) {
+    // If backend is down, tracking will retry on next tick.
   }
 
   await set({

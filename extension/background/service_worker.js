@@ -1,19 +1,17 @@
 // extension/background/service_worker.js
 // ViceBank MV3 background worker (direct-charge version)
 //
-// - Tracks active tab against Porn/Gambling lists
-// - Counts minutes (foreground only) with 15s debounce + 90s idle cutoff
-// - Daily local-midnight reset of UI counters
-// - At grace boundary: shows intercept modal
-// - On "Continue Paid": immediately calls backend /api/charge with:
-//     amount = ceil(max(0, minutesSoFar - grace)) * rate
+// - Tracks ALL OPEN tabs against Porn/Gambling lists (including background tabs)
+// - Bills per distinct domain-minute (Option C): each distinct restricted domain open counts 1/min
+// - Grace is applied exactly per category; after grace, billing continues indefinitely
+// - For testing: grace/counters reset on local startup
 
 import { get, set } from "../lib/storage.js";
 import {
   hostFromUrl,
   todayLocalISO,
   uuidv4,
-  syncMinuteToBackend,
+  ensureSession,
 } from "../lib/util.js";
 // ---------- Defaults ----------
 const DEFAULTS = {
@@ -23,6 +21,8 @@ const DEFAULTS = {
   rates: { porn: 0.05, gambling: 0.5 }, // default $/min
   categoriesOn: { porn: true, gambling: true },
   blocklist: [],
+  // Additional user-provided domains to treat as restricted (extends categories.json)
+  customDomains: { porn: [], gambling: [] },
   lastResetLocalDate: null,
   userId: null,
   backendBaseUrl: "http://localhost:4242",
@@ -38,8 +38,7 @@ const DEFAULTS = {
   paidActive: { porn: false, gambling: false },
 };
 
-const DEBOUNCE_SECONDS = 5; // must be in foreground this long to count a minute
-const IDLE_CUTOFF_SECONDS = 90;
+const IDLE_CUTOFF_SECONDS = 90; // retained, but we do not gate billing on focus anymore
 
 let autoChargeArmed = false;
 let autoChargeTimer = null;
@@ -85,73 +84,7 @@ function startAutoChargeTimer(userId, backendBaseUrl) {
   })();
 }
 
-// In-memory active page/category snapshot
-let active = {
-  category: null,
-  domain: null,
-  host: null,
-  sinceTs: 0,
-  lastTickTs: 0,
-};
-
-// --- web timer (background) ---
-let webTimerInterval = null;
-let webTimerSeconds = 0;
-
-function startWebTimer() {
-  if (webTimerInterval) return;
-  webTimerSeconds = 0;
-  console.log("[ViceBank][WebTimer] start", {
-    category: active?.category,
-    host: active?.host,
-    sinceTs: active?.sinceTs,
-  });
-  webTimerInterval = setInterval(() => {
-    try {
-      // if category lost, stop
-      if (!active?.category) {
-        console.log("[ViceBank][WebTimer] no active category — stopping");
-        stopWebTimer();
-        return;
-      }
-
-      webTimerSeconds++;
-
-      // coarse logging to avoid noise (adjust as desired)
-      if (webTimerSeconds % 1 === 0) {
-        console.log("[ViceBank][WebTimer] tick", {
-          seconds: webTimerSeconds,
-          category: active.category,
-          host: active.host,
-          url: active.url,
-        });
-      }
-
-      // update badge (seconds mod 60 to keep short)
-      try {
-        chrome.action.setBadgeText({ text: String(webTimerSeconds % 60) });
-      } catch (e) {
-        // ignore if not available
-      }
-    } catch (err) {
-      console.error("[ViceBank][WebTimer] error:", err);
-    }
-  }, 1000);
-}
-
-function stopWebTimer() {
-  if (!webTimerInterval) return;
-  clearInterval(webTimerInterval);
-  webTimerInterval = null;
-  console.log("[ViceBank][WebTimer] stopped after seconds=", webTimerSeconds, {
-    lastCategory: active?.category,
-    lastHost: active?.host,
-  });
-  webTimerSeconds = 0;
-  try {
-    chrome.action.setBadgeText({ text: "" });
-  } catch {}
-}
+// (Old "active tab" + web timer logic removed; billing is now based on presence of restricted tabs.)
 
 // ---------- Install / Startup ----------
 chrome.runtime.onInstalled.addListener(async () => {
@@ -172,20 +105,32 @@ chrome.runtime.onInstalled.addListener(async () => {
   try {
     chrome.action.setBadgeBackgroundColor({ color: "#4caf50" });
   } catch {}
-  chrome.alarms.create("vb_tick", { periodInMinutes: 0.1 }); // every 6 seconds
+  chrome.alarms.create("vb_tick", { periodInMinutes: 1 }); // every 1 minute (real time)
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   const st = await get(null);
   console.log("UserId:", st.userId);
   if (!st?.userId) await set({ ...DEFAULTS, userId: uuidv4() });
+  // TESTING: reset grace/counters on startup
+  const today = todayLocalISO();
+  await set({
+    counters: {
+      date: today,
+      porn: { freeMin: 0, paidMin: 0 },
+      gambling: { freeMin: 0, paidMin: 0 },
+    },
+    paidActive: { porn: false, gambling: false },
+    sessionId: null,
+    sessionDate: null,
+  });
   try {
     chrome.action.setBadgeText({ text: "" });
   } catch {}
   try {
     chrome.action.setBadgeBackgroundColor({ color: "#4caf50" });
   } catch {}
-  chrome.alarms.create("vb_tick", { periodInMinutes: 0.1 }); // every 6 seconds
+  chrome.alarms.create("vb_tick", { periodInMinutes: 1 }); // every 1 minute (real time)
 });
 
 // ---------- Category lists ----------
@@ -202,10 +147,21 @@ async function ensureLists() {
 function endsWithHost(host, pattern) {
   return host === pattern || host.endsWith("." + pattern);
 }
-function detectCategory(host) {
+function matchesHost(host, pattern) {
+  if (!host || !pattern) return false;
+  if (pattern.startsWith("*.")) {
+    const p = pattern.slice(2);
+    return host === p || host.endsWith("." + p);
+  }
+  return endsWithHost(host, pattern);
+}
+function detectCategory(host, customDomains) {
   if (!host || !lists) return null;
-  for (const p of lists.porn) if (endsWithHost(host, p)) return "porn";
-  for (const g of lists.gambling) if (endsWithHost(host, g)) return "gambling";
+  const porn = [...(lists.porn || []), ...(customDomains?.porn || [])];
+  const gambling = [...(lists.gambling || []), ...(customDomains?.gambling || [])];
+
+  for (const p of porn) if (matchesHost(host, p)) return "porn";
+  for (const g of gambling) if (matchesHost(host, g)) return "gambling";
   return null;
 }
 
@@ -225,72 +181,42 @@ function initCounters(st, today) {
   return st;
 }
 
-async function refreshActive() {
-  const tabs = await chrome.tabs.query({
-    active: true,
-    lastFocusedWindow: true,
-  });
-  if (!tabs?.[0]?.url) {
-    active.category = null;
-    try {
-      chrome.action.setBadgeText({ text: "" });
-    } catch {}
-    // stop web timer when no restricted tab
-    stopWebTimer();
-    return;
-  }
+function normalizeHost(h) {
+  return (h || "").toLowerCase().replace(/^www\./, "");
+}
 
-  const tab = tabs[0];
-  const st = await get(["categoriesOn", "blocklist"]);
-  const host = hostFromUrl(tab.url);
-
-  // Simple blocklist (supports "*.example.com")
-  const blocked = (st.blocklist || []).some((p) =>
+function isBlocked(host, blocklist) {
+  const hl = normalizeHost(host);
+  return (blocklist || []).some((p) =>
     p.startsWith("*.")
-      ? host.endsWith(p.slice(1))
-      : host === p || host.endsWith("." + p)
+      ? hl.endsWith(p.slice(1).toLowerCase())
+      : hl === p.toLowerCase() || hl.endsWith("." + p.toLowerCase())
   );
-  if (blocked) {
-    active.category = null;
-    try {
-      chrome.action.setBadgeText({ text: "" });
-    } catch {}
-    stopWebTimer();
-    return;
+}
+
+async function collectRestrictedDomains(st) {
+  // Option C: count per distinct domain-minute (all open tabs).
+  const tabs = await chrome.tabs.query({});
+  const byCategory = { porn: new Map(), gambling: new Map() }; // domain -> sampleUrl
+
+  for (const tab of tabs) {
+    const url = tab?.url;
+    if (!url || typeof url !== "string") continue;
+    if (url.startsWith("chrome://") || url.startsWith("chrome-extension://"))
+      continue;
+
+    const host = hostFromUrl(url);
+    if (!host) continue;
+    const hostNorm = normalizeHost(host);
+    if (isBlocked(hostNorm, st.blocklist)) continue;
+
+    const cat = detectCategory(hostNorm, st.customDomains);
+    if (!cat || !st.categoriesOn?.[cat]) continue;
+
+    if (!byCategory[cat].has(hostNorm)) byCategory[cat].set(hostNorm, url);
   }
 
-  const cat = detectCategory(host);
-  if (!cat || !st.categoriesOn?.[cat]) {
-    active.category = null;
-    try {
-      chrome.action.setBadgeText({ text: "" });
-    } catch {}
-    stopWebTimer();
-    return;
-  }
-
-  const now = Date.now();
-  if (active.category !== cat || active.host !== host) {
-    active = {
-      category: cat,
-      host,
-      domain: host,
-      url: tab.url,
-      sinceTs: now,
-      lastTickTs: now,
-    };
-    console.log("[ViceBank] restricted site detected", {
-      host,
-      cat,
-      url: tab.url,
-    });
-    // start immediate web timer on new restricted site visit
-    startWebTimer();
-  } else {
-    active.lastTickTs = now;
-    // ensure timer is running
-    if (!webTimerInterval) startWebTimer();
-  }
+  return byCategory;
 }
 
 // ---------- Minute tick ----------
@@ -298,7 +224,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== "vb_tick") return;
   try {
     await ensureLists();
-    await refreshActive();
 
     let st = await get(null);
     const today = todayLocalISO();
@@ -306,99 +231,80 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
     if (!st.enabled) return;
 
-    const idleState = await new Promise((res) =>
-      chrome.idle.queryState(IDLE_CUTOFF_SECONDS, res)
-    );
-    if (idleState !== "active") return;
-
-    if (!active.category) return;
-
-    // Debounce: require active focus for at least DEBOUNCE_SECONDS before counting
-    const now = Date.now();
-    const secondsActive = Math.floor((now - (active.sinceTs || now)) / 1000);
-    if (secondsActive < DEBOUNCE_SECONDS) return;
-
-    const cat = active.category;
-    const grace = st.grace?.[cat] ?? 0;
-    const floor = st.floors?.[cat] ?? 0;
-    const rate = Math.max(st.rates?.[cat] ?? 0, floor);
-
-    const freeUsed = st.counters?.[cat]?.freeMin ?? 0;
-    const paidUsed = st.counters?.[cat]?.paidMin ?? 0;
-    try {
-      console.log(
-        `[ViceBank] tick: cat=${cat}, free=${freeUsed}, paid=${paidUsed}, grace=${grace}`
-      );
-    } catch {}
-
-    if (freeUsed < grace) {
-      // --- Count one free minute locally ---
-      st.counters[cat].freeMin = freeUsed + 1;
-      await set({ counters: st.counters });
-
-      // --- Sync to backend ---
-      await syncMinuteToBackend(st, active.url, cat);
-
-      // >>> START AUTOCHARGE AFTER FIRST SUCCESSFUL TICK <<<
-      if (!autoChargeArmed) {
-        startAutoChargeTimer(st.userId, st.backendBaseUrl);
-      }
-
+    const byCategory = await collectRestrictedDomains(st);
+    const pornDomains = Array.from(byCategory.porn.entries()); // [domain, url]
+    const gamblingDomains = Array.from(byCategory.gambling.entries());
+    const totalDomains = pornDomains.length + gamblingDomains.length;
+    if (totalDomains === 0) {
       try {
-        const total =
-          (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
-        chrome.action.setBadgeBackgroundColor({ color: "#4caf50" }); // green for free
-        chrome.action.setBadgeText({ text: `${total}` });
+        chrome.action.setBadgeText({ text: "" });
       } catch {}
-
-      // 80% grace warning
-      const threshold = grace > 0 ? Math.ceil(0.8 * grace) : 0;
-      if (grace > 0 && st.counters[cat].freeMin === threshold) {
-        chrome.notifications.create(`vb_warn_${cat}`, {
-          type: "basic",
-          iconUrl: "assets/icon128.png",
-          title: "ViceBank — Grace Warning",
-          message: `You're at 80% of your ${cat} grace (${grace} min/day).`,
-        });
-      }
-    } else {
-      // --- Past grace ---
-      if (!st.paidActive?.[cat]) {
-        // Prompt to continue paid or stop
-        const tabs = await chrome.tabs.query({
-          active: true,
-          lastFocusedWindow: true,
-        });
-        if (tabs?.[0]) {
-          chrome.tabs.sendMessage(tabs[0].id, {
-            type: "VB_SHOW_MODAL",
-            category: cat,
-            rate,
-            domain: active.domain,
-          });
-        }
-        return; // wait for user action
-      }
-
-      // --- User chose to keep paying: tick paid minute ---
-      st.counters[cat].paidMin = paidUsed + 1;
-      await set({ counters: st.counters });
-
-      // --- Sync to backend (paid minute) ---
-      await syncMinuteToBackend(st, active.url, cat);
-
-      // >>> START AUTOCHARGE AFTER FIRST SUCCESSFUL TICK  MAYBE NOT NEEDED <<<
-      if (!autoChargeArmed) {
-        startAutoChargeTimer(st.userId, st.backendBaseUrl);
-      }
-
-      try {
-        const total =
-          (st.counters[cat].freeMin || 0) + (st.counters[cat].paidMin || 0);
-        chrome.action.setBadgeBackgroundColor({ color: "#e53935" }); // red for paid
-        chrome.action.setBadgeText({ text: `${total}` });
-      } catch {}
+      return;
     }
+
+    // Ensure backend session exists (backend may restart)
+    st = await ensureSession(st);
+
+    const events = [];
+    const applyForCategory = (cat, entries) => {
+      const units = entries.length; // domain-minutes
+      if (units <= 0) return;
+
+      const grace = Number(st.grace?.[cat] ?? 0);
+      const freeUsed = Number(st.counters?.[cat]?.freeMin ?? 0);
+      const remainingGrace = Math.max(0, grace - freeUsed);
+      const freeToAdd = Math.min(remainingGrace, units);
+      const paidToAdd = units - freeToAdd;
+
+      st.counters[cat].freeMin = freeUsed + freeToAdd;
+      st.counters[cat].paidMin = Number(st.counters?.[cat]?.paidMin ?? 0) + paidToAdd;
+
+      // Sync per-domain event (Option C)
+      for (const [domain, url] of entries) {
+        events.push({ url: url || `https://${domain}/`, seconds: 60, category: cat });
+      }
+
+      // Notify when we cross grace boundary for this category
+      if (freeToAdd > 0 && paidToAdd > 0) {
+        try {
+          chrome.notifications.create(`vb_grace_done_${cat}`, {
+            type: "basic",
+            iconUrl: "assets/icon128.png",
+            title: "ViceBank — Grace used",
+            message: `Grace is used for ${cat}. Billing continues while restricted tabs remain open.`,
+          });
+        } catch {}
+      }
+    };
+
+    applyForCategory("porn", pornDomains);
+    applyForCategory("gambling", gamblingDomains);
+
+    await set({ counters: st.counters });
+
+    // Batch sync to backend in one call
+    try {
+      const resp = await fetch(`${st.backendBaseUrl}/api/track`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: st.userId,
+          sessionId: st.sessionId,
+          events,
+        }),
+      });
+      if (!resp.ok) {
+        console.warn("[ViceBank] /api/track failed", resp.status);
+      }
+    } catch (e) {
+      console.warn("[ViceBank] /api/track error", e);
+    }
+
+    // Badge: show number of restricted domains open (Option C)
+    try {
+      chrome.action.setBadgeBackgroundColor({ color: "#A855F7" });
+      chrome.action.setBadgeText({ text: String(totalDomains) });
+    } catch {}
   } catch (err) {
     console.error("[ViceBank] tick error:", err);
   }
@@ -548,15 +454,4 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-// Quick listeners to trigger immediate detection (keep in service worker)
-chrome.tabs.onActivated.addListener(() => {
-  refreshActive().catch((e) => console.error("[ViceBank] onActivated:", e));
-});
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === "complete" || changeInfo.url) {
-    refreshActive().catch((e) => console.error("[ViceBank] onUpdated:", e));
-  }
-});
-chrome.windows.onFocusChanged.addListener(() => {
-  refreshActive().catch((e) => console.error("[ViceBank] onFocusChanged:", e));
-});
+// No tab-focus listeners needed; counting is based on open tabs.

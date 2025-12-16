@@ -3,19 +3,32 @@
 <html>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>ViceBank</title>
   <link rel="stylesheet" href="popup.css"/>
 </head>
 <body>
   <div class="wrap">
-    <h1>ViceBank</h1>
-    <div id="usage" class="card"></div>
-    <div id="billing" class="card"></div>
+    <header class="top">
+      <div class="brand">
+        <div class="logo">VB</div>
+        <div class="brandText">
+          <div class="title">ViceBank</div>
+          <div class="subtitle">Today’s usage & controls</div>
+        </div>
+      </div>
+    </header>
+
+    <section id="usage" class="card"></section>
+    <section id="billing" class="card"></section>
+
     <div class="actions">
-      <button id="end">End Paid Session</button>
-      <button id="pause">Pause Tracking</button>
-      <button id="manage">Manage Billing</button>
+      <button class="btn btn--secondary" id="end">End Paid Session</button>
+      <button class="btn btn--secondary" id="pause">Pause Tracking</button>
+      <button class="btn btn--primary" id="manage">Manage Billing</button>
     </div>
+
+    <div class="footnote">Local counters • Syncs minutes to backend</div>
   </div>
   <script type="module" src="popup.js"></script>
 </body>

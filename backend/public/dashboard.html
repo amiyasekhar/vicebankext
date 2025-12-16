@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ViceBank — Dashboard</title>
+    <link rel="stylesheet" href="./css/dashboard.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <div class="brand">
+          <div class="appmark" aria-hidden="true">VB</div>
+          <div>
+            <div class="eyebrow">Dashboard</div>
+            <div class="title">Your ViceBank</div>
+          </div>
+        </div>
+        <div class="meta">
+          <div class="pill" id="weekPill">This week</div>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card">
+          <div class="cardHeader">
+            <div>
+              <div class="kicker">ViceBank wallet</div>
+              <div class="hint">Total billable (if settled now)</div>
+            </div>
+          </div>
+          <div class="bigMoney" id="walletAmount">$0.00</div>
+          <div class="row">
+            <div class="mini">
+              <div class="miniLabel">Would charge</div>
+              <div class="miniValue" id="wouldCharge">$0.00</div>
+            </div>
+            <div class="mini">
+              <div class="miniLabel">Carry (below min)</div>
+              <div class="miniValue" id="wouldCarry">$0.00</div>
+            </div>
+            <div class="mini">
+              <div class="miniLabel">Rollover</div>
+              <div class="miniValue" id="rollover">$0.00</div>
+            </div>
+          </div>
+          <div class="divider"></div>
+          <div class="subgrid" id="perCategory">
+            <!-- filled by JS -->
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="cardHeader">
+            <div>
+              <div class="kicker">Streak</div>
+              <div class="hint">Days with $0 billable (after grace)</div>
+            </div>
+            <div class="streakPill" id="streakPill">0 days</div>
+          </div>
+
+          <div class="streakStats">
+            <div class="stat stat--clean" id="statClean">
+              <div class="statLabel">Clean days</div>
+              <div class="statValue" id="totalCleanDays">0</div>
+            </div>
+            <div class="stat stat--streak" id="statLastStreak">
+              <div class="statLabel">Last streak</div>
+              <div class="statValue" id="lastStreakValue">—</div>
+            </div>
+            <div class="stat stat--break" id="statBreak">
+              <div class="statLabel">Broke on</div>
+              <div class="statValue" id="lastBreakDay">—</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card cardWide">
+          <div class="cardHeader">
+            <div>
+              <div class="kicker">Tips</div>
+              <div class="hint">Make it frictionless to stay clean</div>
+            </div>
+          </div>
+          <ul class="tips">
+            <li>Keep grace low (0–1 min) if you want stronger guardrails.</li>
+            <li>Use custom domains to cover edge sites or mirrors.</li>
+            <li>Check in weekly: settle charges as a “review ritual”.</li>
+          </ul>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <div class="fineprint" id="statusLine">Loading…</div>
+      </footer>
+    </div>
+
+    <script>
+      function fmtUSD(cents) {
+        const v = Number(cents || 0) / 100;
+        return v.toLocaleString(undefined, { style: "currency", currency: "USD" });
+      }
+
+      function el(id) { return document.getElementById(id); }
+
+      function streakTone(days) {
+        if (days >= 14) return "gold";
+        if (days >= 7) return "purple";
+        if (days >= 3) return "green";
+        return "neutral";
+      }
+
+      async function loadDashboard() {
+        const params = new URLSearchParams(location.search);
+        const userId = params.get("userId");
+        const tzOffsetMinutes = new Date().getTimezoneOffset();
+
+        if (!userId) {
+          el("statusLine").textContent = "Missing userId. Return to the extension setup flow and reopen this page.";
+          return;
+        }
+
+        const resp = await fetch(`/api/dashboard?userId=${encodeURIComponent(userId)}&tzOffsetMinutes=${encodeURIComponent(String(tzOffsetMinutes))}`);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data?.ok) {
+          el("statusLine").textContent = "Failed to load dashboard data.";
+          return;
+        }
+
+        const w = data.wallet || {};
+        el("weekPill").textContent = `Week: ${w.weekStart} → ${w.weekEnd}`;
+
+        const walletTotal = (w.totalCents || 0) + (w.rolloverCents || 0);
+        el("walletAmount").textContent = fmtUSD(walletTotal);
+        el("wouldCharge").textContent = fmtUSD(w.wouldChargeCents || 0);
+        el("wouldCarry").textContent = fmtUSD(w.wouldCarryCents || 0);
+        el("rollover").textContent = fmtUSD(w.rolloverCents || 0);
+
+        // Per-category cards
+        const perCatEl = el("perCategory");
+        perCatEl.innerHTML = "";
+        const per = w.perCategory || {};
+        const cats = Object.keys(per).length ? Object.keys(per) : ["porn", "gambling"];
+        for (const cat of cats) {
+          const v = per[cat] || { minutes: 0, centsPerMin: 0, centsTotal: 0 };
+          const item = document.createElement("div");
+          item.className = "miniCard";
+          item.innerHTML = `
+            <div class="miniCardTop">
+              <div class="cat">${cat}</div>
+              <div class="rate">${fmtUSD(v.centsPerMin || 0)}/min</div>
+            </div>
+            <div class="miniCardMid">${v.minutes || 0} min</div>
+            <div class="miniCardBot">${fmtUSD(v.centsTotal || 0)}</div>
+          `;
+          perCatEl.appendChild(item);
+        }
+
+        // Streak
+        const streakDays = Number(data?.streak?.days || 0);
+        const pill = el("streakPill");
+        pill.textContent = `${streakDays} day${streakDays === 1 ? "" : "s"}`;
+        pill.dataset.tone = streakTone(streakDays);
+
+        // Streak extras
+        const totalCleanDays = Number(data?.streak?.totalCleanDays || 0);
+        el("totalCleanDays").textContent = String(totalCleanDays);
+
+        const lastStreak = data?.streak?.lastStreak;
+        if (lastStreak?.length) {
+          el("lastStreakValue").textContent = `${lastStreak.length} day${lastStreak.length === 1 ? "" : "s"}`;
+        } else {
+          el("lastStreakValue").textContent = "—";
+        }
+        const brokeOn = data?.streak?.lastBreakDay || null;
+        el("lastBreakDay").textContent = brokeOn ? brokeOn : "—";
+
+        // Tone the cards based on whether we have values
+        const cleanCard = el("statClean");
+        const lastStreakCard = el("statLastStreak");
+        const breakCard = el("statBreak");
+        if (cleanCard) cleanCard.dataset.active = totalCleanDays > 0 ? "true" : "false";
+        if (lastStreakCard) lastStreakCard.dataset.active = lastStreak?.length ? "true" : "false";
+        if (breakCard) breakCard.dataset.active = brokeOn ? "true" : "false";
+
+        el("statusLine").textContent = "Live preview based on tracked minutes (server memory).";
+      }
+
+      loadDashboard().catch((e) => {
+        console.error(e);
+        el("statusLine").textContent = "Error loading dashboard.";
+      });
+    </script>
+  </body>
+</html>
+
+

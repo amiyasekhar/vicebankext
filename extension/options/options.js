@@ -8,7 +8,180 @@ const graceInput = document.getElementById("graceInput");
 const ratePornInput = document.getElementById("ratePornInput");
 const rateGamblingInput = document.getElementById("rateGamblingInput");
 
+const pornDomainsEl = document.getElementById("pornDomains");
+const gamblingDomainsEl = document.getElementById("gamblingDomains");
+const pornDomainInput = document.getElementById("pornDomainInput");
+const gamblingDomainInput = document.getElementById("gamblingDomainInput");
+const pornDomainAddBtn = document.getElementById("pornDomainAddBtn");
+const gamblingDomainAddBtn = document.getElementById("gamblingDomainAddBtn");
+const pornDomainError = document.getElementById("pornDomainError");
+const gamblingDomainError = document.getElementById("gamblingDomainError");
+
 const backendBaseUrl = "http://localhost:4242"; // or from input if you want dynamic
+const CUSTOM_DOMAINS_KEY = "customDomains";
+
+async function loadDefaultDomainLists() {
+  const url = chrome.runtime.getURL("lib/categories.json");
+  const resp = await fetch(url);
+  return resp.json();
+}
+
+function normalizeDomainInput(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "";
+
+  // allow wildcard prefix
+  const hasWildcard = s.startsWith("*.");
+  const withoutWildcard = hasWildcard ? s.slice(2) : s;
+
+  // strip protocol
+  const noProto = withoutWildcard.replace(/^https?:\/\//, "");
+  // strip path/query/hash
+  const hostOnly = noProto.split("/")[0].split("?")[0].split("#")[0];
+  const host = hostOnly.replace(/^www\./, "");
+  if (!host) return "";
+
+  return hasWildcard ? `*.${host}` : host;
+}
+
+function isValidDomainPattern(domain) {
+  if (!domain) return false;
+  const d = domain.startsWith("*.") ? domain.slice(2) : domain;
+  // Minimal sanity: must contain a dot, no spaces, no protocol chars
+  if (/\s/.test(d)) return false;
+  if (!d.includes(".")) return false;
+  if (!/^[a-z0-9.-]+$/.test(d)) return false;
+  if (d.startsWith(".") || d.endsWith(".")) return false;
+  if (d.includes("..")) return false;
+  return true;
+}
+
+function uniq(arr) {
+  return Array.from(new Set((arr || []).filter(Boolean)));
+}
+
+function chip(label, { removable = false, onRemove = null, variant = "default" } = {}) {
+  const el = document.createElement("span");
+  el.className = `chip ${variant === "default" ? "chip--default" : ""}`.trim();
+  el.textContent = label;
+
+  if (removable) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chipRemove";
+    btn.setAttribute("aria-label", `Remove ${label}`);
+    btn.textContent = "×";
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onRemove?.();
+    };
+    el.appendChild(btn);
+  }
+
+  return el;
+}
+
+async function ensureCustomDomains(st) {
+  const current = st?.[CUSTOM_DOMAINS_KEY];
+  const next = {
+    porn: Array.isArray(current?.porn) ? current.porn : [],
+    gambling: Array.isArray(current?.gambling) ? current.gambling : [],
+  };
+
+  // If key missing or malformed, repair it
+  if (!current || !Array.isArray(current?.porn) || !Array.isArray(current?.gambling)) {
+    await set({ [CUSTOM_DOMAINS_KEY]: next });
+  }
+  return next;
+}
+
+function setError(category, msg) {
+  const el = category === "porn" ? pornDomainError : gamblingDomainError;
+  if (!el) return;
+  el.textContent = msg || "";
+}
+
+async function renderDomainsUI(defaultLists, customDomains) {
+  if (!pornDomainsEl || !gamblingDomainsEl) return;
+
+  const defaultsPorn = uniq(defaultLists?.porn || []);
+  const defaultsGambling = uniq(defaultLists?.gambling || []);
+  const customPorn = uniq(customDomains?.porn || []);
+  const customGambling = uniq(customDomains?.gambling || []);
+
+  pornDomainsEl.innerHTML = "";
+  gamblingDomainsEl.innerHTML = "";
+
+  // Defaults (non-removable)
+  for (const d of defaultsPorn) pornDomainsEl.appendChild(chip(d, { variant: "default" }));
+  for (const d of defaultsGambling) gamblingDomainsEl.appendChild(chip(d, { variant: "default" }));
+
+  // Customs (removable)
+  for (const d of customPorn) {
+    pornDomainsEl.appendChild(
+      chip(d, {
+        removable: true,
+        variant: "custom",
+        onRemove: async () => {
+          const st = await get(null);
+          const cur = (await ensureCustomDomains(st));
+          cur.porn = (cur.porn || []).filter((x) => x !== d);
+          await set({ [CUSTOM_DOMAINS_KEY]: cur });
+          await renderDomainsUI(defaultLists, cur);
+        },
+      })
+    );
+  }
+  for (const d of customGambling) {
+    gamblingDomainsEl.appendChild(
+      chip(d, {
+        removable: true,
+        variant: "custom",
+        onRemove: async () => {
+          const st = await get(null);
+          const cur = (await ensureCustomDomains(st));
+          cur.gambling = (cur.gambling || []).filter((x) => x !== d);
+          await set({ [CUSTOM_DOMAINS_KEY]: cur });
+          await renderDomainsUI(defaultLists, cur);
+        },
+      })
+    );
+  }
+}
+
+async function addDomain(category, defaultLists) {
+  const input = category === "porn" ? pornDomainInput : gamblingDomainInput;
+  if (!input) return;
+  setError(category, "");
+
+  const normalized = normalizeDomainInput(input.value);
+  if (!isValidDomainPattern(normalized)) {
+    setError(category, "Enter a valid domain like example.com (or *.example.com).");
+    return;
+  }
+
+  const defaults = uniq(defaultLists?.[category] || []);
+  if (defaults.includes(normalized)) {
+    setError(category, "That domain is already included in the defaults.");
+    input.value = "";
+    return;
+  }
+
+  const st = await get(null);
+  const cur = await ensureCustomDomains(st);
+  const list = uniq(cur?.[category] || []);
+  if (list.includes(normalized)) {
+    setError(category, "You already added that domain.");
+    input.value = "";
+    return;
+  }
+
+  cur[category] = uniq([...(cur[category] || []), normalized]);
+  await set({ [CUSTOM_DOMAINS_KEY]: cur });
+  input.value = "";
+  await renderDomainsUI(defaultLists, cur);
+}
 
 // ------------------ Helpers ------------------
 function parseGraceToMinutes(val) {
@@ -55,7 +228,8 @@ async function onAgreeAndContinue(userId, opts) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         userId,
-        grace: opts.grace,
+        // Backend expects per-category grace
+        grace: { porn: opts.grace, gambling: opts.grace },
         rates: opts.rates,
         categoriesOn: { porn: true, gambling: true },
         extensionVersion: chrome.runtime.getManifest().version,
@@ -111,6 +285,26 @@ document.addEventListener("DOMContentLoaded", async () => {
   graceInput.value = `${String(g).padStart(1, "0")}:00`;
   ratePornInput.value = st.rates?.porn ?? 0.05;
   rateGamblingInput.value = st.rates?.gambling ?? 0.5;
+
+  // Domains UI
+  try {
+    const defaults = await loadDefaultDomainLists();
+    const custom = await ensureCustomDomains(st);
+    await renderDomainsUI(defaults, custom);
+
+    pornDomainAddBtn?.addEventListener("click", () => addDomain("porn", defaults));
+    gamblingDomainAddBtn?.addEventListener("click", () =>
+      addDomain("gambling", defaults)
+    );
+    pornDomainInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addDomain("porn", defaults);
+    });
+    gamblingDomainInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addDomain("gambling", defaults);
+    });
+  } catch (e) {
+    console.warn("[ViceBank] Failed to load domain lists UI", e);
+  }
 });
 
 // ------------------ Main Button Click ------------------
@@ -137,145 +331,3 @@ agreeBtn.onclick = async () => {
     rates: { porn: ratePorn, gambling: rateGambling },
   });
 };
-
-let active = {
-  category: null,
-  domain: null,
-  host: null,
-  sinceTs: 0,
-  lastTickTs: 0,
-};
-
-// --- web timer state (moved here) ---
-let webTimerInterval = null;
-let webTimerSeconds = 0;
-
-function startWebTimer() {
-  if (webTimerInterval) return;
-  webTimerSeconds = 0;
-  console.log("[ViceBank][WebTimer] start", {
-    category: active?.category,
-    host: active?.host,
-    sinceTs: active?.sinceTs,
-  });
-  webTimerInterval = setInterval(() => {
-    try {
-      if (!active?.category) {
-        stopWebTimer();
-        return;
-      }
-      webTimerSeconds++;
-      if (webTimerSeconds % 5 === 0) {
-        console.log("[ViceBank][WebTimer] tick", {
-          seconds: webTimerSeconds,
-          category: active.category,
-          host: active.host,
-          url: active.url,
-        });
-      }
-      try {
-        chrome.action.setBadgeText({ text: String(webTimerSeconds % 60) });
-      } catch {}
-    } catch (err) {
-      console.error("[ViceBank][WebTimer] error:", err);
-    }
-  }, 1000);
-}
-
-function stopWebTimer() {
-  if (!webTimerInterval) return;
-  clearInterval(webTimerInterval);
-  webTimerInterval = null;
-  console.log("[ViceBank][WebTimer] stopped after seconds=", webTimerSeconds, {
-    lastCategory: active?.category,
-    lastHost: active?.host,
-  });
-  webTimerSeconds = 0;
-  try {
-    chrome.action.setBadgeText({ text: "" });
-  } catch {}
-}
-
-// --- Refresh active tab info (new) ---
-async function refreshActive() {
-  const tabs = await chrome.tabs.query({
-    active: true,
-    lastFocusedWindow: true,
-  });
-  if (!tabs?.[0]?.url) {
-    console.log("[ViceBank][WebTimer] refreshActive: no active tab/url");
-    active.category = null;
-    try {
-      chrome.action.setBadgeText({ text: "" });
-    } catch {}
-    // stop web timer when no restricted tab
-    stopWebTimer();
-    return;
-  }
-
-  const tab = tabs[0];
-  const st = await get(["categoriesOn", "blocklist"]);
-  const host = hostFromUrl(tab.url);
-
-  // Simple blocklist (supports "*.example.com")
-  const blocked = (st.blocklist || []).some((p) =>
-    p.startsWith("*.")
-      ? host.endsWith(p.slice(1))
-      : host === p || host.endsWith("." + p)
-  );
-  if (blocked) {
-    console.log("[ViceBank][WebTimer] refreshActive: host blocked", host);
-    active.category = null;
-    try {
-      chrome.action.setBadgeText({ text: "" });
-    } catch {}
-    stopWebTimer();
-    return;
-  }
-
-  const cat = detectCategory(host);
-  if (!cat || !st.categoriesOn?.[cat]) {
-    console.log(
-      "[ViceBank][WebTimer] refreshActive: not a tracked category",
-      host,
-      cat
-    );
-    active.category = null;
-    try {
-      chrome.action.setBadgeText({ text: "" });
-    } catch {}
-    stopWebTimer();
-    return;
-  }
-
-  const now = Date.now();
-  if (active.category !== cat || active.host !== host) {
-    active = {
-      category: cat,
-      host,
-      domain: host,
-      url: tab.url,
-      sinceTs: now,
-      lastTickTs: now,
-    };
-    // start immediate web timer on new restricted site visit
-    startWebTimer();
-  } else {
-    active.lastTickTs = now;
-    // ensure timer runs while staying on same site
-    if (!webTimerInterval) startWebTimer();
-  }
-}
-
-// --- quick listeners to detect visits immediately (moved to service worker) ---
-chrome.tabs.onActivated.addListener(() => {
-  refreshActive().catch((e) => console.error("[ViceBank] onActivated:", e));
-});
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === "complete" || changeInfo.url) {
-    refreshActive().catch((e) => console.error("[ViceBank] onUpdated:", e));
-  }
-});
-chrome.windows.onFocusChanged.addListener(() => {
-  refreshActive().catch((e) => console.error("[ViceBank] onFocusChanged:", e));
-});

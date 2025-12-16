@@ -3,43 +3,120 @@
 
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>ViceBank — Consent</title>
   <link rel="stylesheet" href="options.css" />
 </head>
 
 <body>
   <div class="wrap">
-    <h1>Set Your Accountability Rules</h1>
-    <p>You get <span id="graceVal">3</span> min/day free on selected categories.</p>
-    <p>After that, ViceBank charges <span id="ratePorn">$0.05/min (Porn)</span> and <span id="rateGambling">$0.50/min
-        (Gambling)</span> while those sites are open in the foreground.</p>
-    <p>We only record domain names and minutes—never page content.</p>
-    <p>Charges are automatic & weekly. You can change your grace (0–3) and increase your rate anytime; lowering applies
-      after your current streak ends.</p>
-
-    <div class="checks">
-      <label><input type="checkbox" id="c1"> I agree ViceBank may charge per-minute after my daily grace is
-        used.</label>
-      <label><input type="checkbox" id="c2"> I understand charges are non-refundable once incurred.</label>
-      <label><input type="checkbox" id="c3"> I reviewed the Terms of Service and Billing Policy.</label>
-      <label><input type="checkbox" id="c4"> I consent to domain-level monitoring (no page content) and local
-        notifications.</label>
+    <div class="hero">
+      <div class="heroInner">
+        <div class="brandRow">
+          <div class="brandMark" aria-hidden="true">VB</div>
+          <div>
+            <h1>Set your rules</h1>
+            <p>
+              You get <span id="graceVal">3</span> min/day free per category. After that, ViceBank charges
+              <span id="ratePorn">$0.05/min (Porn)</span> and <span id="rateGambling">$0.50/min (Gambling)</span>
+              while those sites are open in the foreground.
+              <br/>We record domains + minutes only—never page content.
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <div class="row">
-      <label>Grace per category (0–3:00):</label>
-      <input type="text" id="graceInput" placeholder="mm:ss or minutes" value="3:00" />
-    </div>
+    <div class="shell">
+      <div class="section">
+        <div class="sectionTitle">Consent</div>
+        <div class="checks">
+          <label class="check">
+            <input type="checkbox" id="c1">
+            <span><b>I agree ViceBank may charge per-minute after my daily grace is used.</b><small>Charges are based on active foreground time.</small></span>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="c2">
+            <span><b>I understand charges are non-refundable once incurred.</b><small>This helps avoid disputes and chargebacks.</small></span>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="c3">
+            <span><b>I reviewed the Terms of Service and Billing Policy.</b><small>Consent is stored for auditability.</small></span>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="c4">
+            <span><b>I consent to domain-level monitoring and local notifications.</b><small>No page content is captured.</small></span>
+          </label>
+        </div>
+      </div>
 
-    <div class="row">
-      <label>Rates ($/min): Porn</label>
-      <input type="number" step="0.01" id="ratePornInput" value="0.05" min="0.05" />
-      <label>Gambling</label>
-      <input type="number" step="0.01" id="rateGamblingInput" value="0.50" min="0.50" />
-    </div>
+      <div class="section">
+        <div class="sectionTitle">Limits & pricing</div>
+        <div class="grid2">
+          <div class="field">
+            <label>Grace per category (0–3:00)</label>
+            <input type="text" id="graceInput" placeholder="mm:ss or minutes" value="3:00" />
+          </div>
 
-    <div class="cta">
-      <button id="agree" disabled>Agree & Continue</button>
+          <div class="field">
+            <label>Rates ($/min)</label>
+            <div class="grid2">
+              <div>
+                <label class="subLabel">Porn</label>
+                <input type="number" step="0.01" id="ratePornInput" value="0.05" min="0.05" />
+              </div>
+              <div>
+                <label class="subLabel">Gambling</label>
+                <input type="number" step="0.01" id="rateGamblingInput" value="0.50" min="0.50" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="sectionTitle">Tracked domains</div>
+        <div class="miniNote" style="margin-top:-6px">
+          These are the domains ViceBank watches. Defaults ship with the extension; you can add your own anytime.
+        </div>
+
+        <div class="grid2 domainGrid">
+          <div class="domainPane">
+            <div class="domainHeader">
+              <div class="domainTitle">Porn</div>
+              <div class="domainMeta">Defaults + your additions</div>
+            </div>
+            <div class="chips" id="pornDomains"></div>
+            <div class="domainAddRow">
+              <input id="pornDomainInput" type="text" placeholder="example.com or *.example.com" />
+              <button class="btn btnGhost" id="pornDomainAddBtn" type="button">Add</button>
+            </div>
+            <div class="errorText" id="pornDomainError" aria-live="polite"></div>
+          </div>
+
+          <div class="domainPane">
+            <div class="domainHeader">
+              <div class="domainTitle">Gambling</div>
+              <div class="domainMeta">Defaults + your additions</div>
+            </div>
+            <div class="chips" id="gamblingDomains"></div>
+            <div class="domainAddRow">
+              <input id="gamblingDomainInput" type="text" placeholder="example.com or *.example.com" />
+              <button class="btn btnGhost" id="gamblingDomainAddBtn" type="button">Add</button>
+            </div>
+            <div class="errorText" id="gamblingDomainError" aria-live="polite"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section sectionCta">
+        <div class="cta">
+          <div class="miniNote">
+            You can raise rates anytime.
+          </div>
+          <button class="btn btnPrimary disabled" id="agree" disabled>Agree & Continue</button>
+        </div>
+      </div>
     </div>
   </div>
   <script type="module" src="options.js"></script>

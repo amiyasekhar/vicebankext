@@ -18,10 +18,31 @@ import cors from "cors";
 import Stripe from "stripe";
 import bodyParser from "body-parser";
 import path from "path";
+import fs from "fs";
+import os from "os";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/* -------------------- local usage logging (append-only) -------------------- */
+const VICEBANK_LOG_FILE =
+  process.env.VICEBANK_LOG_FILE ||
+  path.join(__dirname, "logs", "vicebank_usage.log");
+
+function ensureLogDir() {
+  const dir = path.dirname(VICEBANK_LOG_FILE);
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function appendLogLine(obj) {
+  try {
+    ensureLogDir();
+    fs.appendFileSync(VICEBANK_LOG_FILE, JSON.stringify(obj) + os.EOL, "utf8");
+  } catch (e) {
+    console.warn("[vicebank] failed to write usage log:", e?.message || e);
+  }
+}
 
 /* -------------------- bootstrap -------------------- */
 const app = express();
@@ -235,7 +256,10 @@ function addUsage({ userId, domain, category, seconds, ts = Date.now() }) {
 /* -------------------- consent (dispute defense) -------------------- */
 function getConsentSnapshot(userId) {
   const snap = consents.get(userId) || {};
-  const grace = snap.grace || { porn: 1, gambling: 0 }; // minutes per day (defaults)
+  // Grace should be per-category. Older clients may send a number; normalize.
+  let grace = snap.grace;
+  if (typeof grace === "number") grace = { porn: grace, gambling: grace };
+  grace = grace || { porn: 1, gambling: 0 }; // minutes per day (defaults)
   const rates = snap.rates || { porn: 0.05, gambling: 0.5 }; // $/min (defaults)
   const categoriesOn = snap.categoriesOn || { porn: true, gambling: true };
   return { grace, rates, categoriesOn };
@@ -269,6 +293,9 @@ app.get("/landing", (_req, res) =>
 );
 app.get("/landing-dynamic", (_req, res) =>
   res.sendFile(path.join(publicDir, "landing-dynamic.html"))
+);
+app.get("/dashboard", (_req, res) =>
+  res.sendFile(path.join(publicDir, "dashboard.html"))
 );
 
 app.post("/api/stripe/setup-intent", async (req, res) => {
@@ -368,7 +395,7 @@ app.post("/api/stripe/checkout-success", async (req, res) => {
       );
     }
 
-    res.json({ ok: true });
+    res.json({ ok: true, userId, customerId });
   } catch (err) {
     console.error("Checkout success processing failed:", err);
     res.status(500).json({ error: err.message });
@@ -420,6 +447,7 @@ app.post("/api/track", (req, res) => {
   }
 
   let accepted = 0;
+  const acceptedEvents = [];
   for (const ev of events) {
     if (!ev) continue;
     const ts = Number.isFinite(ev.ts) ? ev.ts : Date.now();
@@ -430,11 +458,67 @@ app.post("/api/track", (req, res) => {
     if (category && seconds > 0 && domain) {
       addUsage({ userId, domain, category, seconds, ts });
       accepted++;
+      acceptedEvents.push({ ts, domain, category, seconds });
     }
   }
 
   sess.lastSeenAt = Date.now();
   const bucket = ensureCounterBucket(userId);
+
+  // Append a durable log line for each /api/track tick
+  try {
+    const today = dayKey(); // UTC day string
+    const daily = computeDailyBillable({ userId, dayStr: today });
+
+    // "Wallet" preview (weekly billable + rollover). Uses session tzOffset if present.
+    const tzOffsetMinutes = Number(sess?.tzOffsetMinutes ?? 0);
+    const { weekStartUTC, weekEndUTC, weekStartStr, weekEndStr } = getWeekBounds({
+      tzOffsetMinutes,
+    });
+    const { totalCents } = collectWeeklyBillableMinutes({
+      userId,
+      weekStartUTC,
+      weekEndUTC,
+      tzOffsetMinutes,
+    });
+    const rollover = weeklyRolloversCents.get(userId) || 0;
+
+    // Make grace-vs-billable explicit (per day, per category)
+    const minutes = daily?.minutes || {};
+    const billableMinutes = daily?.billableMinutes || {};
+    const graceAppliedMinutesByCategory = {
+      porn: Math.max(0, Number(minutes.porn || 0) - Number(billableMinutes.porn || 0)),
+      gambling: Math.max(
+        0,
+        Number(minutes.gambling || 0) - Number(billableMinutes.gambling || 0)
+      ),
+    };
+
+    appendLogLine({
+      ts: new Date().toISOString(),
+      userId,
+      sessionId,
+      day: today,
+      weekStart: weekStartStr,
+      weekEnd: weekEndStr,
+      accepted,
+      events: acceptedEvents,
+      graceAppliedMinutesByCategory,
+      graceAppliedMinutes:
+        (graceAppliedMinutesByCategory.porn || 0) +
+        (graceAppliedMinutesByCategory.gambling || 0),
+      todayBillableCents: daily.billableCents,
+      walletCents: totalCents + rollover,
+      rolloverCents: rollover,
+      byCategory: bucket.byCategory,
+      topDomain: Object.entries(bucket.byDomain)
+        .sort((a, b) => b[1].seconds - a[1].seconds)
+        .slice(0, 1)
+        .map(([d, v]) => ({ domain: d, seconds: v.seconds, category: v.category }))[0] || null,
+    });
+  } catch (e) {
+    console.warn("[vicebank] log tick error:", e?.message || e);
+  }
 
   return res.json({
     ok: true,
@@ -478,6 +562,228 @@ app.get("/api/counters/today", (req, res) => {
     updatedAt: bucket.updatedAt,
     byCategory: bucket.byCategory,
     byDomain: bucket.byDomain,
+  });
+});
+
+/* -------------------- dashboard stats -------------------- */
+function daysAgoUTCStr(daysAgo = 0) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - daysAgo);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
+}
+
+function getBucketByDay(userId, dayStr) {
+  const k = `${userId}::${dayStr}`;
+  return counters.get(k) || null;
+}
+
+function computeDailyBillable({ userId, dayStr }) {
+  const { grace, rates, categoriesOn } = getConsentSnapshot(userId);
+  const bucket = getBucketByDay(userId, dayStr);
+  if (!bucket) return { exists: false, billableCents: 0, minutes: {}, billableMinutes: {} };
+
+  const minutes = {};
+  const billableMinutes = {};
+  let billableCents = 0;
+
+  for (const cat of ["porn", "gambling"]) {
+    const m = Number(bucket?.byCategory?.[cat]?.minutes || 0);
+    minutes[cat] = m;
+
+    if (!categoriesOn?.[cat]) {
+      billableMinutes[cat] = 0;
+      continue;
+    }
+
+    const g = Math.max(0, Number(grace?.[cat] ?? 0));
+    const billable = Math.max(0, m - g);
+    billableMinutes[cat] = billable;
+
+    const configured = Number(rates?.[cat] ?? 0);
+    const dollarsPerMin = Math.max(CATEGORY_FLOORS[cat] ?? 0, configured);
+    const centsPerMin = Math.round(dollarsPerMin * 100);
+    billableCents += billable * centsPerMin;
+  }
+
+  return { exists: true, billableCents, minutes, billableMinutes };
+}
+
+function computeStreakDays(userId, { maxLookbackDays = 365 } = {}) {
+  // Consecutive days ending today with 0 billable minutes (after grace).
+  let streak = 0;
+  for (let i = 0; i < maxLookbackDays; i++) {
+    const dayStr = daysAgoUTCStr(i);
+    const d = computeDailyBillable({ userId, dayStr });
+    if (!d.exists) break; // no data -> streak breaks (conservative)
+    if (d.billableCents > 0) break;
+    streak++;
+  }
+  return streak;
+}
+
+function parseYYYYMMDDToUTC(dayStr) {
+  // dayStr: YYYY-MM-DD
+  return new Date(dayStr + "T00:00:00.000Z");
+}
+
+function addDaysUTC(dayStr, days) {
+  const d = parseYYYYMMDDToUTC(dayStr);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function listUserDays(userId) {
+  // returns sorted ascending YYYY-MM-DD for days that exist in counters
+  const days = [];
+  for (const key of counters.keys()) {
+    const idx = key.lastIndexOf("::");
+    if (idx < 0) continue;
+    const uid = key.slice(0, idx);
+    if (uid !== userId) continue;
+    const day = key.slice(idx + 2);
+    if (day && /^\d{4}-\d{2}-\d{2}$/.test(day)) days.push(day);
+  }
+  days.sort();
+  return days;
+}
+
+function computeStreakStats(userId) {
+  const days = listUserDays(userId);
+  const byDay = new Map(); // day -> { exists, billableCents }
+  for (const day of days) {
+    const d = computeDailyBillable({ userId, dayStr: day });
+    byDay.set(day, d);
+  }
+
+  let totalDaysWithData = days.length;
+  let totalCleanDays = 0;
+  for (const day of days) {
+    const d = byDay.get(day);
+    if (d?.exists && (d.billableCents || 0) === 0) totalCleanDays++;
+  }
+
+  // Build clean streak runs (consecutive days with exists + billableCents==0)
+  const runs = []; // { start, end, length }
+  let cur = null;
+  for (const day of days) {
+    const d = byDay.get(day);
+    const isClean = d?.exists && (d.billableCents || 0) === 0;
+    if (!isClean) {
+      if (cur) runs.push(cur);
+      cur = null;
+      continue;
+    }
+
+    if (!cur) {
+      cur = { start: day, end: day, length: 1 };
+      continue;
+    }
+
+    const expected = addDaysUTC(cur.end, 1);
+    if (day === expected) {
+      cur.end = day;
+      cur.length += 1;
+    } else {
+      // gap breaks streak
+      runs.push(cur);
+      cur = { start: day, end: day, length: 1 };
+    }
+  }
+  if (cur) runs.push(cur);
+
+  // Current streak run is the run whose end is "today" (UTC) if today exists+clean
+  const today = dayKey(); // UTC day string used by counters
+  const todayData = computeDailyBillable({ userId, dayStr: today });
+  const currentStreakDays =
+    todayData.exists && (todayData.billableCents || 0) === 0
+      ? (runs.find((r) => r.end === today)?.length || 0)
+      : 0;
+
+  // Last streak: the most recent run BEFORE the current streak (if current streak exists),
+  // otherwise the most recent run overall.
+  let lastRun = null;
+  if (runs.length > 0) {
+    if (currentStreakDays > 0) {
+      // find index of current run and pick previous
+      const idx = runs.findIndex((r) => r.end === today);
+      lastRun = idx > 0 ? runs[idx - 1] : null;
+    } else {
+      lastRun = runs[runs.length - 1];
+    }
+  }
+
+  // Break day: the first billable day after lastRun.end (only if that day exists and is billable)
+  let lastBreakDay = null;
+  if (lastRun) {
+    const candidate = addDaysUTC(lastRun.end, 1);
+    const candData = byDay.get(candidate) || computeDailyBillable({ userId, dayStr: candidate });
+    if (candData?.exists && (candData.billableCents || 0) > 0) lastBreakDay = candidate;
+  }
+
+  return {
+    totalDaysWithData,
+    totalCleanDays,
+    currentStreakDays,
+    lastStreak: lastRun ? { length: lastRun.length, start: lastRun.start, end: lastRun.end } : null,
+    lastBreakDay,
+  };
+}
+
+app.get("/api/dashboard", (req, res) => {
+  const userId = req.query.userId?.toString();
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const tzOffsetMinutes = Number(req.query.tzOffsetMinutes ?? 0);
+  const { weekStartUTC, weekEndUTC, weekStartStr, weekEndStr } = getWeekBounds({
+    tzOffsetMinutes,
+  });
+  const { perCat, totalCents } = collectWeeklyBillableMinutes({
+    userId,
+    weekStartUTC,
+    weekEndUTC,
+    tzOffsetMinutes,
+  });
+  const rollover = weeklyRolloversCents.get(userId) || 0;
+  const wouldChargeCents = totalCents + rollover >= STRIPE_MIN_CENTS ? totalCents + rollover : 0;
+  const wouldCarryCents = totalCents + rollover < STRIPE_MIN_CENTS ? totalCents + rollover : 0;
+
+  const streakStats = computeStreakStats(userId);
+
+  const lastDays = [];
+  for (let i = 13; i >= 0; i--) {
+    const dayStr = daysAgoUTCStr(i);
+    const d = computeDailyBillable({ userId, dayStr });
+    const status = !d.exists ? "no_data" : d.billableCents > 0 ? "billable" : "clean";
+    lastDays.push({
+      day: dayStr,
+      status,
+      billableCents: d.billableCents,
+      minutes: d.minutes,
+      billableMinutes: d.billableMinutes,
+    });
+  }
+
+  return res.json({
+    ok: true,
+    userId,
+    wallet: {
+      weekStart: weekStartStr,
+      weekEnd: weekEndStr,
+      perCategory: perCat,
+      totalCents,
+      rolloverCents: rollover,
+      wouldChargeCents,
+      wouldCarryCents,
+    },
+    streak: {
+      days: streakStats.currentStreakDays,
+      totalCleanDays: streakStats.totalCleanDays,
+      totalDaysWithData: streakStats.totalDaysWithData,
+      lastStreak: streakStats.lastStreak,
+      lastBreakDay: streakStats.lastBreakDay,
+      last14: lastDays,
+    },
   });
 });
 

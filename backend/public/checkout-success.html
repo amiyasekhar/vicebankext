@@ -17,8 +17,13 @@
                 <span id="status-label">Finishing setup…</span>
             </div>
 
-            <h1 id="title">Payment Setup Successful!</h1>
-            <p id="subtitle">We’re securely linking your payment method to your ViceBank account.</p>
+            <div class="hero">
+                <div class="appmark" aria-hidden="true">VB</div>
+                <div class="heroText">
+                    <h1 id="title">Payment Setup Successful!</h1>
+                    <p id="subtitle">We’re securely linking your payment method to your ViceBank account.</p>
+                </div>
+            </div>
 
             <p class="small">
                 This usually takes just a moment. Once complete, you'll be able to start using your accountability rules
@@ -35,6 +40,7 @@
                     <div class="spinner" id="spinner"></div>
                     <span id="primary-btn-label">Completing setup…</span>
                 </button>
+                <div class="fineprint">You can close this tab once setup completes.</div>
             </div>
         </div>
     </div>
@@ -52,13 +58,15 @@
             const spinner = document.getElementById('spinner');
             const primaryBtn = document.getElementById('primary-btn');
             const primaryLabel = document.getElementById('primary-btn-label');
+            let resolvedUserId = null;
 
             const goHome = () => {
                 window.location.href = '/';
             };
 
             const goDashboard = () => {
-                window.location.href = '/dashboard'; // change if your dashboard route differs
+                const qs = resolvedUserId ? `?userId=${encodeURIComponent(resolvedUserId)}` : '';
+                window.location.href = `/dashboard${qs}`;
             };
 
             if (!session_id) {
@@ -89,6 +97,7 @@
                 primaryBtn.disabled = false;
 
                 if (data.ok) {
+                    resolvedUserId = data.userId || null;
                     statusPill.classList.add('success');
                     statusLabel.textContent = 'Payment method linked';
                     title.textContent = 'You’re all set!';

@@ -1,43 +1,97 @@
 
-.vb-modal-backdrop {
+:root{
+  --vb-bg:#0B0B12;
+  --vb-panel: rgba(255,255,255,.07);
+  --vb-panel2: rgba(255,255,255,.10);
+  --vb-text: rgba(255,255,255,.92);
+  --vb-muted: rgba(255,255,255,.65);
+  --vb-border: rgba(255,255,255,.14);
+  --vb-shadow: 0 22px 70px rgba(0,0,0,.65);
+  --vb-r: 18px;
+  --vb-primary1:#A855F7;
+  --vb-primary2:#6D28D9;
+  --vb-focus: rgba(168,85,247,.35);
+}
+
+.vb-modal-backdrop{
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.6);
   z-index: 2147483647;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding: 18px;
+  background:
+    radial-gradient(120% 90% at 10% 0%, rgba(168,85,247,.22), transparent 55%),
+    rgba(0,0,0,.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
-.vb-modal {
-  width: min(520px, 90vw);
-  background: #0A0A0A;
-  color: white;
-  border-radius: 16px;
-  padding: 24px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-  font-family: -apple-system, BlinkMacSystemFont, "Inter", "SF Pro", Segoe UI, Roboto, sans-serif;
-  border: 1px solid #222;
+
+.vb-modal{
+  width: min(520px, 92vw);
+  border-radius: var(--vb-r);
+  border: 1px solid var(--vb-border);
+  background: linear-gradient(180deg, var(--vb-panel2), var(--vb-panel));
+  box-shadow: var(--vb-shadow);
+  color: var(--vb-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Display","SF Pro Text", Segoe UI, Roboto, Inter, Arial, sans-serif;
+  padding: 18px;
+  transform: translateY(8px) scale(.985);
+  opacity: 0;
+  animation: vbIn .18s ease-out forwards;
 }
-.vb-modal h2 {
+
+@keyframes vbIn{
+  to{ transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.vb-modal h2{
   margin: 0 0 8px 0;
-  font-size: 20px;
+  font-size: 18px;
+  letter-spacing: -.1px;
 }
-.vb-actions {
-  display: flex;
-  gap: 12px;
-  margin-top: 16px;
+
+.vb-modal p{
+  margin: 0;
+  color: var(--vb-muted);
+  line-height: 1.5;
 }
-.vb-actions button {
-  padding: 10px 14px;
-  border-radius: 10px;
+.vb-modal strong{ color: #fff; }
+
+.vb-actions{
+  display:flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.vb-actions button{
+  appearance:none;
+  border-radius: 14px;
+  padding: 11px 12px;
+  font-weight: 700;
+  border: 1px solid var(--vb-border);
+  cursor:pointer;
+  transition: transform .12s ease, filter .12s ease, background .12s ease;
+}
+.vb-actions button:active{ transform: translateY(1px) scale(.99); }
+.vb-actions button:focus{ outline:none; }
+.vb-actions button:focus-visible{ box-shadow: 0 0 0 4px var(--vb-focus); }
+
+#vb-continue{
   border: none;
-  cursor: pointer;
+  color:#fff;
+  background: linear-gradient(90deg, var(--vb-primary1), var(--vb-primary2));
 }
-#vb-continue {
-  background: #A855F7;
-  color: white;
+#vb-continue:hover{ filter: brightness(1.05); }
+
+#vb-stop{
+  background: rgba(255,255,255,.06);
+  color: var(--vb-text);
 }
-#vb-stop {
-  background: #222;
-  color: #eee;
+#vb-stop:hover{ background: rgba(255,255,255,.10); }
+
+@media (prefers-reduced-motion: reduce){
+  .vb-modal{ animation:none; opacity:1; transform:none; }
+  .vb-actions button{ transition:none; }
 }
